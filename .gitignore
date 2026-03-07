@@ -1,0 +1,33 @@
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.spec
+
+# ── Entornos virtuales ─────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── PyInstaller / builds ───────────────────────────────────────
+build/
+dist/
+installer_output/
+Peru Compras Bot/
+
+# ── Reportes y logs generados en ejecución ────────────────────
+reporte_*.csv
+reporte_*.xlsx
+bot.log
+debug_output.txt
+
+# ── Archivos temporales del sistema ───────────────────────────
+tmpclaude-*
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ── VS Code ───────────────────────────────────────────────────
+.vscode/
