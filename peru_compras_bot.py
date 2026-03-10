@@ -430,6 +430,22 @@ def manejar_confirmacion_sweetalert(driver, timeout=WAIT_NORMAL):
     return False
 
 
+def leer_opciones_select(driver, select_id, timeout=WAIT_NORMAL):
+    """Lee las opciones de un <select> excluyendo el placeholder (value=0 o vacío)."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.ID, select_id))
+        )
+        el = driver.find_element(By.ID, select_id)
+        return [
+            opt.text.strip()
+            for opt in el.find_elements(By.TAG_NAME, "option")
+            if opt.get_attribute("value") not in ("", "0") and opt.text.strip()
+        ]
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # PASO 1: LOGIN Y VERIFICACION
 # ---------------------------------------------------------------------------
@@ -1066,23 +1082,22 @@ class PeruComprasGUI:
         )
         frame_excel.columnconfigure(0, weight=1)
 
-        frame_filtros = ttk.LabelFrame(contenedor, text="Filtros editables", padding=10)
+        frame_filtros = ttk.LabelFrame(contenedor, text="Filtros", padding=10)
         frame_filtros.pack(fill="x", pady=(0, 10))
 
         ttk.Label(frame_filtros, text="Acuerdo Marco:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frame_filtros, textvariable=self.acuerdo_var, width=80).grid(
-            row=0, column=1, sticky="we", padx=(8, 0), pady=(0, 6)
-        )
+        self.combo_acuerdo = ttk.Combobox(frame_filtros, textvariable=self.acuerdo_var, width=78)
+        self.combo_acuerdo.grid(row=0, column=1, sticky="we", padx=(8, 0), pady=(0, 6))
+        self.combo_acuerdo.bind("<<ComboboxSelected>>", self._on_acuerdo_changed)
 
         ttk.Label(frame_filtros, text="Catálogo:").grid(row=1, column=0, sticky="w")
-        ttk.Entry(frame_filtros, textvariable=self.catalogo_var, width=80).grid(
-            row=1, column=1, sticky="we", padx=(8, 0), pady=(0, 6)
-        )
+        self.combo_catalogo = ttk.Combobox(frame_filtros, textvariable=self.catalogo_var, width=78)
+        self.combo_catalogo.grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(0, 6))
+        self.combo_catalogo.bind("<<ComboboxSelected>>", self._on_catalogo_changed)
 
         ttk.Label(frame_filtros, text="Categoría:").grid(row=2, column=0, sticky="w")
-        ttk.Entry(frame_filtros, textvariable=self.categoria_var, width=80).grid(
-            row=2, column=1, sticky="we", padx=(8, 0), pady=(0, 6)
-        )
+        self.combo_categoria = ttk.Combobox(frame_filtros, textvariable=self.categoria_var, width=78)
+        self.combo_categoria.grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(0, 6))
 
         ttk.Label(frame_filtros, text="Pausa entre productos (seg):").grid(
             row=3, column=0, sticky="w"
@@ -1090,6 +1105,17 @@ class PeruComprasGUI:
         ttk.Entry(frame_filtros, textvariable=self.pausa_var, width=10).grid(
             row=3, column=1, sticky="w", padx=(8, 0)
         )
+
+        self.btn_cargar_opts = ttk.Button(
+            frame_filtros, text="Cargar opciones del portal", command=self._cargar_opciones
+        )
+        self.btn_cargar_opts.grid(row=4, column=0, columnspan=2, pady=(10, 0), sticky="w")
+        ttk.Label(
+            frame_filtros,
+            text="Inicia sesión manualmente cuando Chrome se abra, igual que al iniciar la automatización.",
+            foreground="#666666",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
         frame_filtros.columnconfigure(1, weight=1)
 
         frame_acciones = ttk.Frame(contenedor)
@@ -1171,6 +1197,132 @@ class PeruComprasGUI:
             )
 
         self.root.after(0, _update)
+
+    # ------------------------------------------------------------------
+    # Cascada de filtros
+    # ------------------------------------------------------------------
+    def _on_acuerdo_changed(self, event=None):
+        """Al cambiar el Acuerdo, los catálogos/categorías ya no son válidos."""
+        self.combo_catalogo["values"] = []
+        self.catalogo_var.set("")
+        self.combo_categoria["values"] = []
+        self.categoria_var.set("")
+        self.estado_var.set("Acuerdo cambiado — haz clic en 'Cargar opciones del portal' para actualizar los filtros")
+
+    def _on_catalogo_changed(self, event=None):
+        """Al cambiar el Catálogo, la categoría ya no es válida."""
+        self.combo_categoria["values"] = []
+        self.categoria_var.set("")
+        self.estado_var.set("Catálogo cambiado — haz clic en 'Cargar opciones del portal' para actualizar categorías")
+
+    # ------------------------------------------------------------------
+    # Cargar opciones desde el portal
+    # ------------------------------------------------------------------
+    def _cargar_opciones(self):
+        if self.worker and self.worker.is_alive():
+            messagebox.showwarning("Ocupado", "Espera a que termine el proceso en curso.")
+            return
+        self.login_event.clear()
+        self.btn_cargar_opts.configure(state="disabled")
+        self.btn_iniciar.configure(state="disabled")
+        self.btn_login.configure(state="disabled")
+        self.estado_var.set("Conectando al portal para cargar opciones...")
+        self.worker = threading.Thread(target=self._cargar_opciones_worker, daemon=True)
+        self.worker.start()
+
+    def _cargar_opciones_worker(self):
+        global MODO_GUI, EVENTO_LOGIN, GUI_NOTIFICAR_LOGIN
+        MODO_GUI = True
+        EVENTO_LOGIN = self.login_event
+        GUI_NOTIFICAR_LOGIN = self._notificar_login_ui
+        driver = None
+        try:
+            chrome_opts = Options()
+            chrome_opts.add_argument("--start-maximized")
+            chrome_opts.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_opts.add_experimental_option("useAutomationExtension", False)
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_opts)
+
+            paso1_login(driver)
+            paso2_navegacion(driver)
+
+            # --- Acuerdo Marco ---
+            acuerdo_opts = leer_opciones_select(driver, "ajaxAcuerdo")
+            log.info(f"Opciones Acuerdo ({len(acuerdo_opts)}): {acuerdo_opts}")
+
+            # Seleccionar el Acuerdo actual (o el primero disponible)
+            catalogo_opts = []
+            categoria_opts = []
+            acuerdo_actual = self.acuerdo_var.get().strip()
+            if acuerdo_opts:
+                try:
+                    sel_a = esperar_opciones_select(driver, "ajaxAcuerdo", WAIT_LARGO)
+                    texto_a = acuerdo_actual if acuerdo_actual else acuerdo_opts[0]
+                    seleccionar_por_texto_parcial(sel_a, texto_a)
+                    time.sleep(2)
+                    catalogo_opts = leer_opciones_select(driver, "ajaxCatalogo")
+                    log.info(f"Opciones Catálogo ({len(catalogo_opts)}): {catalogo_opts}")
+                except Exception as e:
+                    log.warning(f"No se pudo cargar catálogos: {e}")
+
+            # --- Catálogo → Categoría ---
+            catalogo_actual = self.catalogo_var.get().strip()
+            if catalogo_opts:
+                try:
+                    sel_c = esperar_opciones_select(driver, "ajaxCatalogo", WAIT_LARGO)
+                    texto_c = catalogo_actual if catalogo_actual else catalogo_opts[0]
+                    seleccionar_por_texto_parcial(sel_c, texto_c)
+                    time.sleep(2)
+                    categoria_opts = leer_opciones_select(driver, "ajaxCategoria")
+                    log.info(f"Opciones Categoría ({len(categoria_opts)}): {categoria_opts}")
+                except Exception as e:
+                    log.warning(f"No se pudo cargar categorías: {e}")
+
+            self.root.after(0, lambda: self._actualizar_combos(acuerdo_opts, catalogo_opts, categoria_opts))
+
+        except Exception as e:
+            err = str(e)
+            log.error(f"Error cargando opciones del portal: {e}", exc_info=True)
+            self.root.after(0, lambda: messagebox.showerror(
+                "Error", f"No se pudieron cargar las opciones del portal:\n{err}"
+            ))
+            self.root.after(0, lambda: self.estado_var.set("Error al cargar opciones"))
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+            self.root.after(0, lambda: self.btn_cargar_opts.configure(state="normal"))
+            self.root.after(0, lambda: self.btn_iniciar.configure(state="normal"))
+            self.root.after(0, lambda: self.btn_login.configure(state="disabled"))
+
+    def _actualizar_combos(self, acuerdos, catalogos, categorias):
+        self.combo_acuerdo["values"] = acuerdos
+        self.combo_catalogo["values"] = catalogos
+        self.combo_categoria["values"] = categorias
+
+        # Asignar primer valor si el campo estaba vacío
+        if acuerdos and not self.acuerdo_var.get():
+            self.acuerdo_var.set(acuerdos[0])
+        if catalogos and not self.catalogo_var.get():
+            self.catalogo_var.set(catalogos[0])
+        if categorias and not self.categoria_var.get():
+            self.categoria_var.set(categorias[0])
+
+        self.estado_var.set(
+            f"Listo — {len(acuerdos)} acuerdos, {len(catalogos)} catálogos, {len(categorias)} categorías cargados"
+        )
+        messagebox.showinfo(
+            "Opciones cargadas",
+            f"Se cargaron correctamente desde el portal:\n"
+            f"  • {len(acuerdos)} Acuerdo(s) Marco\n"
+            f"  • {len(catalogos)} Catálogo(s)\n"
+            f"  • {len(categorias)} Categoría(s)\n\n"
+            f"Ahora puedes seleccionar cada filtro desde el desplegable.",
+        )
 
     def _iniciar(self):
         excel = Path(self.excel_var.get().strip())
