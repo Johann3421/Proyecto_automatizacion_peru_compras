@@ -11,6 +11,7 @@ Uso:
 """
 
 import csv
+import json
 import logging
 import os
 import re
@@ -63,6 +64,11 @@ PAUSA_ENTRE_PRODUCTOS = 2  # Pausa entre iteraciones para no sobrecargar
 MODO_GUI = False
 EVENTO_LOGIN = None
 GUI_NOTIFICAR_LOGIN = None
+
+# Control de ejecución (pausa / detenición / aprendizaje)
+PAUSA_EVENTO = None       # threading.Event: set=corriendo, clear=en pausa
+DETENER_EVENTO = None     # threading.Event: set=detener
+ANALIZADOR = None         # instancia de AnalizadorFallos
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -619,6 +625,7 @@ def paso4_actualizar_stock(driver, df: pd.DataFrame):
 
 def actualizar_producto(driver, parte: str, stock: str):
     """Busca un producto por numero de parte y actualiza su stock."""
+    extra_espera = ANALIZADOR.wait_extra() if ANALIZADOR else 0.0
 
     # 1. Escribir numero de parte en el campo de busqueda
     campo_busqueda = esperar_elemento(driver, By.ID, "C_Descripcion")
@@ -631,7 +638,7 @@ def actualizar_producto(driver, parte: str, stock: str):
     log.info(f"  Busqueda lanzada para: {parte}")
 
     # 3. Esperar a que cargue la tabla de resultados
-    time.sleep(3)  # Pausa inicial para carga AJAX
+    time.sleep(3 + extra_espera)  # Pausa inicial para carga AJAX
 
     try:
         WebDriverWait(driver, WAIT_NORMAL).until(
@@ -712,7 +719,7 @@ def actualizar_producto(driver, parte: str, stock: str):
             log.error(f"  ✗ Error en click: {e}")
     
     log.info("  → Esperando que aparezca el modal...")
-    time.sleep(3)
+    time.sleep(3 + extra_espera)
 
     # 5. Esperar a que el formulario del modal aparezca de múltiples formas
     form_encontrado = False
@@ -937,6 +944,93 @@ def recuperar_estado(driver):
 
 
 # ---------------------------------------------------------------------------
+# APRENDIZAJE ADAPTATIVO
+# ---------------------------------------------------------------------------
+class AnalizadorFallos:
+    """
+    Registra patrones de error durante la ejección y activa ajustes automáticos
+    para reducir la probabilidad de que el mismo fallo se repita.
+    El historial acumulado se guarda en aprendizaje.json para persistir entre sesiones.
+    """
+
+    ARCHIVO = Path(__file__).parent / "aprendizaje.json"
+    UMBRAL = 3  # fallos del mismo tipo necesarios para activar un ajuste
+
+    def __init__(self):
+        self.historial = {}       # tipo_fallo -> count (sesión actual)
+        self.acumulado = {}       # tipo_fallo -> count (histórico)
+        self.ajustes_activos = set()
+        self._cargar()
+        # Activar ajustes que ya superaron el umbral en sesiones anteriores
+        for tipo, cnt in self.acumulado.items():
+            if cnt >= self.UMBRAL:
+                self.ajustes_activos.add(tipo)
+        if self.ajustes_activos:
+            log.info(
+                f"[APRENDIZAJE] Ajustes cargados de sesión anterior: "
+                f"{', '.join(self.ajustes_activos)}"
+            )
+
+    def _cargar(self):
+        try:
+            if self.ARCHIVO.exists():
+                data = json.loads(self.ARCHIVO.read_text(encoding="utf-8"))
+                self.acumulado = data.get("acumulado", {})
+        except Exception:
+            self.acumulado = {}
+
+    def registrar(self, tipo_fallo: str):
+        """Registra un fallo y activa ajustes si se supera el umbral."""
+        if not tipo_fallo:
+            return
+        self.historial[tipo_fallo] = self.historial.get(tipo_fallo, 0) + 1
+        self.acumulado[tipo_fallo] = self.acumulado.get(tipo_fallo, 0) + 1
+        count = self.historial[tipo_fallo]
+        if count >= self.UMBRAL and tipo_fallo not in self.ajustes_activos:
+            self.ajustes_activos.add(tipo_fallo)
+            log.info(
+                f"[APRENDIZAJE] Patrón detectado: '{tipo_fallo}' ocurrió {count} veces "
+                f"→ ajuste activado para el resto de la ejecución"
+            )
+
+    def wait_extra(self) -> float:
+        """Segundos de espera adicionales si hay timeouts recurrentes."""
+        return 5.0 if "Tiempo de espera agotado" in self.ajustes_activos else 0.0
+
+    def forzar_recarga(self) -> bool:
+        """True si debe recargar filtros antes de cada búsqueda."""
+        return "Producto no encontrado en la tabla" in self.ajustes_activos
+
+    def preferir_js(self) -> bool:
+        """True si debe preferir ejecución JS en vez de clic para abrir el modal."""
+        return "Modal de stock no se abrió" in self.ajustes_activos
+
+    def resumen(self) -> str:
+        if not self.ajustes_activos:
+            return "Sin ajustes activos"
+        desc = {
+            "Tiempo de espera agotado": "+5s de espera extra por producto",
+            "Producto no encontrado en la tabla": "recarga de filtros antes de buscar",
+            "Modal de stock no se abrió": "ejecución JS directa para modal",
+        }
+        return " | ".join(desc.get(a, a) for a in self.ajustes_activos)
+
+    def guardar(self):
+        try:
+            data = {
+                "acumulado": self.acumulado,
+                "ultima_sesion": str(datetime.now()),
+                "nota": "Generado automáticamente. Borra este archivo para resetear el aprendizaje.",
+            }
+            self.ARCHIVO.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            log.info(f"[APRENDIZAJE] Conocimiento guardado en: {self.ARCHIVO.name}")
+        except Exception as e:
+            log.warning(f"[APRENDIZAJE] No se pudo guardar: {e}")
+
+
+# ---------------------------------------------------------------------------
 # EJECUCION REUTILIZABLE (CLI + GUI)
 # ---------------------------------------------------------------------------
 def ejecutar_bot(
@@ -949,7 +1043,16 @@ def ejecutar_bot(
     """Ejecuta el flujo completo del bot con configuración dinámica."""
     global EXCEL_PATH, ACUERDO_TEXTO, CATALOGO_TEXTO, CATEGORIA_TEXTO
     global PAUSA_ENTRE_PRODUCTOS, REPORTE_PATH, RESULTADOS
+    global PAUSA_EVENTO, DETENER_EVENTO, ANALIZADOR
     RESULTADOS = []
+    # Inicializar eventos para modo CLI (la GUI los crea en _worker_run antes de llamar acá)
+    if PAUSA_EVENTO is None:
+        PAUSA_EVENTO = threading.Event()
+        PAUSA_EVENTO.set()
+    if DETENER_EVENTO is None:
+        DETENER_EVENTO = threading.Event()
+    ANALIZADOR = AnalizadorFallos()
+    log.info(f"[APRENDIZAJE] Ajustes al inicio: {ANALIZADOR.resumen()}") 
 
     EXCEL_PATH = Path(excel_path)
     ACUERDO_TEXTO = acuerdo_texto
@@ -991,6 +1094,8 @@ def ejecutar_bot(
         paso3_filtros(driver)
         paso4_actualizar_stock(driver, df)
         generar_reporte_excel(acuerdo_texto, catalogo_texto, categoria_texto)
+        if ANALIZADOR:
+            ANALIZADOR.guardar()
         return REPORTE_PATH
     finally:
         driver.quit()
@@ -1044,6 +1149,7 @@ class PeruComprasGUI:
         self.login_event = threading.Event()
         self.worker = None
         self.reporte_generado = None
+        self._pausado = False
 
         self.excel_var = tk.StringVar(value=str(Path(__file__).parent / "productos.xlsx"))
         self.acuerdo_var = tk.StringVar(value=ACUERDO_TEXTO)
@@ -1121,8 +1227,18 @@ class PeruComprasGUI:
         frame_acciones = ttk.Frame(contenedor)
         frame_acciones.pack(fill="x", pady=(0, 10))
 
-        self.btn_iniciar = ttk.Button(frame_acciones, text="Iniciar automatización", command=self._iniciar)
+        self.btn_iniciar = ttk.Button(frame_acciones, text="▶ Iniciar automatización", command=self._iniciar)
         self.btn_iniciar.pack(side="left", padx=(0, 8))
+
+        self.btn_pausar = ttk.Button(
+            frame_acciones, text="⏸ Pausar", command=self._pausar_reanudar, state="disabled"
+        )
+        self.btn_pausar.pack(side="left", padx=(0, 8))
+
+        self.btn_detener = ttk.Button(
+            frame_acciones, text="⏹ Detener", command=self._detener, state="disabled"
+        )
+        self.btn_detener.pack(side="left", padx=(0, 8))
 
         self.btn_login = ttk.Button(
             frame_acciones,
@@ -1132,10 +1248,13 @@ class PeruComprasGUI:
         )
         self.btn_login.pack(side="left", padx=(0, 8))
 
-        ttk.Button(frame_acciones, text="Abrir carpeta del proyecto", command=self._abrir_carpeta).pack(
+        ttk.Button(frame_acciones, text="Abrir carpeta", command=self._abrir_carpeta).pack(
             side="left", padx=(0, 8)
         )
-        ttk.Button(frame_acciones, text="Abrir último reporte", command=self._abrir_reporte).pack(side="left")
+        ttk.Button(frame_acciones, text="Abrir reporte", command=self._abrir_reporte).pack(
+            side="left", padx=(0, 8)
+        )
+        ttk.Button(frame_acciones, text="Ver aprendizaje", command=self._ver_aprendizaje).pack(side="left")
 
         frame_log = ttk.LabelFrame(contenedor, text="Ejecución en tiempo real", padding=10)
         frame_log.pack(fill="both", expand=True)
@@ -1324,6 +1443,75 @@ class PeruComprasGUI:
             f"Ahora puedes seleccionar cada filtro desde el desplegable.",
         )
 
+    # ------------------------------------------------------------------
+    # Pausa / Detección / Aprendizaje
+    # ------------------------------------------------------------------
+    def _pausar_reanudar(self):
+        if not self._pausado:
+            if PAUSA_EVENTO:
+                PAUSA_EVENTO.clear()
+            self._pausado = True
+            self.btn_pausar.configure(text="▶ Reanudar")
+            self.estado_var.set("⏸ En pausa — haz clic en 'Reanudar' para continuar")
+            log.info("⏸ Ejecución pausada por el usuario.")
+        else:
+            if PAUSA_EVENTO:
+                PAUSA_EVENTO.set()
+            self._pausado = False
+            self.btn_pausar.configure(text="⏸ Pausar")
+            self.estado_var.set("▶ Reanudando...")
+            log.info("▶ Ejecución reanudada por el usuario.")
+
+    def _detener(self):
+        if not messagebox.askyesno(
+            "Detener proceso",
+            "¿Detener la automatización?\n\n"
+            "Se generará el reporte con los resultados hasta ahora.",
+        ):
+            return
+        if DETENER_EVENTO:
+            DETENER_EVENTO.set()
+        if PAUSA_EVENTO:
+            PAUSA_EVENTO.set()   # desbloquear si estaba en pausa
+        self._pausado = False
+        self.btn_pausar.configure(text="⏸ Pausar")
+        self.btn_detener.configure(state="disabled")
+        self.estado_var.set("⏹ Deteniendo... (terminará el producto actual)")
+        log.info("⏹ Detección solicitada por el usuario.")
+
+    def _ver_aprendizaje(self):
+        arch = Path(__file__).parent / "aprendizaje.json"
+        if not arch.exists():
+            messagebox.showinfo(
+                "Aprendizaje",
+                "Aún no hay datos de aprendizaje.\n"
+                "El bot comienza a registrar patrones de error durante la primera ejecución.",
+            )
+            return
+        try:
+            data = json.loads(arch.read_text(encoding="utf-8"))
+            acum = data.get("acumulado", {})
+            sesion = data.get("ultima_sesion", "Desconocida")
+            if not acum:
+                messagebox.showinfo("Aprendizaje", "Aún no se han registrado errores.")
+                return
+            lineas = [f"\u00daltima sesión: {sesion}\n", "Errores acumulados (histórico):"]
+            for tipo, cnt in sorted(acum.items(), key=lambda x: -x[1]):
+                marca = " ← AJUSTE ACTIVO" if cnt >= AnalizadorFallos.UMBRAL else ""
+                lineas.append(f"  • {tipo}: {cnt} vez/veces{marca}")
+            lineas += [
+                "",
+                f"Los ajustes se activan cuando un mismo fallo se repite {AnalizadorFallos.UMBRAL}+ veces:",
+                "  • Timeout → +5s de espera extra por producto",
+                "  • Modal no abre → ejecución JS directa para modal",
+                "  • Producto no encontrado → recarga de filtros antes de buscar",
+                "",
+                "Para resetear: elimina el archivo 'aprendizaje.json'.",
+            ]
+            messagebox.showinfo("Estado de Aprendizaje", "\n".join(lineas))
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo leer el archivo de aprendizaje:\n{e}")
+
     def _iniciar(self):
         excel = Path(self.excel_var.get().strip())
         acuerdo = self.acuerdo_var.get().strip()
@@ -1346,7 +1534,11 @@ class PeruComprasGUI:
             return
 
         self.btn_iniciar.configure(state="disabled")
+        self.btn_pausar.configure(state="normal")
+        self.btn_detener.configure(state="normal")
         self.btn_login.configure(state="disabled")
+        self._pausado = False
+        self.btn_pausar.configure(text="⏸ Pausar")
         self.estado_var.set("Iniciando automatización...")
 
         self.worker = threading.Thread(
@@ -1357,10 +1549,13 @@ class PeruComprasGUI:
         self.worker.start()
 
     def _worker_run(self, excel, acuerdo, catalogo, categoria, pausa):
-        global MODO_GUI, EVENTO_LOGIN, GUI_NOTIFICAR_LOGIN
+        global MODO_GUI, EVENTO_LOGIN, GUI_NOTIFICAR_LOGIN, PAUSA_EVENTO, DETENER_EVENTO
         MODO_GUI = True
         EVENTO_LOGIN = self.login_event
         GUI_NOTIFICAR_LOGIN = self._notificar_login_ui
+        PAUSA_EVENTO = threading.Event()
+        PAUSA_EVENTO.set()        # inicia sin pausa
+        DETENER_EVENTO = threading.Event()  # inicia sin detección
 
         try:
             reporte = ejecutar_bot(
@@ -1380,7 +1575,10 @@ class PeruComprasGUI:
             self.root.after(0, lambda: messagebox.showerror("Error", detalle))
         finally:
             self.root.after(0, lambda: self.btn_iniciar.configure(state="normal"))
+            self.root.after(0, lambda: self.btn_pausar.configure(state="disabled", text="⏸ Pausar"))
+            self.root.after(0, lambda: self.btn_detener.configure(state="disabled"))
             self.root.after(0, lambda: self.btn_login.configure(state="disabled"))
+            self._pausado = False
 
 
 def iniciar_interfaz():
