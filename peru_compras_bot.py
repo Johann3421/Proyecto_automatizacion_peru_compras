@@ -27,6 +27,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 import pandas as pd
+from openpyxl import Workbook as _OxlWorkbook
+from openpyxl.styles import (
+    PatternFill as _OxlFill, Font as _OxlFont,
+    Alignment as _OxlAlignment, Border as _OxlBorder, Side as _OxlSide,
+)
 from selenium import webdriver
 from selenium.common.exceptions import (
     NoAlertPresentException,
@@ -126,13 +131,156 @@ def registrar_resultado(parte: str, stock, estado: str, detalle: str = "", durac
     log.info(f"  [{simbolo}] {parte} -> {detalle}")
 
 
+def generar_plantilla_excel(destino: Path):
+    """
+    Crea un archivo Excel plantilla con instrucciones claras para que el usuario
+    sepa cómo llenarlo correctamente antes de subirlo al bot.
+    """
+    wb = _OxlWorkbook()
+
+    # ── helpers de estilo ────────────────────────────────────────────────
+    def fill(color):
+        return _OxlFill("solid", fgColor=color)
+
+    def font(bold=False, size=10, color="000000", italic=False):
+        return _OxlFont(name="Calibri", bold=bold, size=size, color=color, italic=italic)
+
+    borde = _OxlBorder(
+        left=_OxlSide(style="thin", color="BFBFBF"),
+        right=_OxlSide(style="thin", color="BFBFBF"),
+        top=_OxlSide(style="thin", color="BFBFBF"),
+        bottom=_OxlSide(style="thin", color="BFBFBF"),
+    )
+    ac = _OxlAlignment(horizontal="center", vertical="center", wrap_text=False)
+    al = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
+
+    def c(ws, row, col, value, fll=None, fnt=None, aln=None):
+        cell = ws.cell(row=row, column=col, value=value)
+        if fll:
+            cell.fill = fll
+        if fnt:
+            cell.font = fnt
+        cell.border = borde
+        cell.alignment = aln or al
+        return cell
+
+    # ── Hoja 1: Datos ────────────────────────────────────────────────────
+    ws = wb.active
+    ws.title = "Productos"
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 14
+
+    # Título
+    ws.merge_cells("A1:B1")
+    cell = ws["A1"]
+    cell.value = "Plantilla de Productos — Peru Compras Bot"
+    cell.font = font(bold=True, size=13, color="FFFFFF")
+    cell.fill = fill("00205B")
+    cell.alignment = ac
+    ws.row_dimensions[1].height = 24
+
+    # Subtítulo / instrucción rápida
+    ws.merge_cells("A2:B2")
+    cell = ws["A2"]
+    cell.value = "Completa las columnas 'Parte' y 'Stock' a partir de la fila 4. No borres los encabezados."
+    cell.font = font(italic=True, size=9, color="595959")
+    cell.alignment = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
+    ws.row_dimensions[2].height = 14
+    ws.row_dimensions[3].height = 6
+
+    # Encabezados
+    for col, (txt, color_fll) in enumerate(
+        [("Parte", "1F4E79"), ("Stock", "1F4E79")], start=1
+    ):
+        c(ws, 4, col, txt, fill(color_fll), font(bold=True, size=11, color="FFFFFF"), aln=ac)
+    ws.row_dimensions[4].height = 20
+
+    # Filas de ejemplo (se pueden borrar)
+    ejemplos = [
+        ("ABC-12345", 10),
+        ("XYZ-67890", 0),
+        ("MON-00001", 5),
+    ]
+    for i, (parte, stock) in enumerate(ejemplos, start=5):
+        fll = fill("EBF3FB") if i % 2 == 0 else fill("FFFFFF")
+        c(ws, i, 1, parte, fll, font(size=10, color="595959"))
+        c(ws, i, 2, stock, fll, font(size=10, color="595959"), aln=ac)
+        ws.row_dimensions[i].height = 16
+
+    # ── Hoja 2: Instrucciones ────────────────────────────────────────────
+    ws2 = wb.create_sheet("Instrucciones")
+    ws2.sheet_view.showGridLines = False
+    ws2.column_dimensions["A"].width = 6
+    ws2.column_dimensions["B"].width = 60
+
+    instrucciones = [
+        ("INSTRUCCIONES PARA COMPLETAR EL ARCHIVO", "titulo"),
+        ("", "sep"),
+        ("1. Columna 'Parte'", "subtitulo"),
+        ("   Escribe el número de parte exacto del producto tal como aparece en el portal.", "texto"),
+        ("   Ejemplo: ABC-12345", "ejemplo"),
+        ("", "sep"),
+        ("2. Columna 'Stock'", "subtitulo"),
+        ("   Escribe la cantidad de stock disponible. Solo números enteros (0, 1, 5, 100…).", "texto"),
+        ("   Usa 0 para indicar sin stock. No uses comas ni puntos decimales.", "texto"),
+        ("   Ejemplo: 10", "ejemplo"),
+        ("", "sep"),
+        ("3. Reglas importantes", "subtitulo"),
+        ("   ✔  No borres ni renombres los encabezados 'Parte' y 'Stock'.", "texto"),
+        ("   ✔  No dejes filas completamente vacías entre productos.", "texto"),
+        ("   ✔  No uses hojas adicionales para los datos (usa siempre 'Productos').", "texto"),
+        ("   ✔  Guarda el archivo en formato .xlsx antes de cargarlo en el bot.", "texto"),
+        ("   ✗  No incluyas símbolos, espacios extra ni texto en la columna Stock.", "advertencia"),
+        ("   ✗  No fusiones celdas ni apliques filtros en la hoja de datos.", "advertencia"),
+        ("", "sep"),
+        ("4. Cómo usar el archivo en el bot", "subtitulo"),
+        ("   a) Guarda este archivo con el nombre que prefieras (ej: mis_productos.xlsx).", "texto"),
+        ("   b) En la aplicación, haz clic en 'Seleccionar Excel' y elige este archivo.", "texto"),
+        ("   c) Configura los filtros y haz clic en 'Iniciar automatización'.", "texto"),
+        ("", "sep"),
+        ("5. ¿Qué pasa si hay un error?", "subtitulo"),
+        ("   El bot intentará procesar todos los productos.", "texto"),
+        ("   Los que fallen quedan anotados en el reporte Excel con el motivo del error.", "texto"),
+        ("   Puedes corregir esos productos y volver a ejecutar sólo con ellos.", "texto"),
+    ]
+
+    estilos = {
+        "titulo":     (fill("00205B"), font(bold=True,  size=13, color="FFFFFF")),
+        "sep":        (None,          None),
+        "subtitulo":  (fill("D9E1F2"), font(bold=True,  size=10, color="1F4E79")),
+        "texto":      (fill("FFFFFF"), font(size=10,    color="333333")),
+        "ejemplo":    (fill("EBF3FB"), font(italic=True, size=10, color="2E75B6")),
+        "advertencia":(fill("FFF2CC"), font(size=10,    color="9C6500")),
+    }
+
+    for i, (texto, estilo) in enumerate(instrucciones, start=1):
+        fll, fnt = estilos.get(estilo, (None, None))
+        ws2.merge_cells(f"A{i}:B{i}")
+        cell = ws2[f"A{i}"]
+        cell.value = texto
+        if fll:
+            cell.fill = fll
+            cell.border = borde
+        if fnt:
+            cell.font = fnt
+        cell.alignment = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
+        ws2.row_dimensions[i].height = 18 if texto else 8
+
+    wb.save(destino)
+
+
 def generar_reporte_excel(acuerdo_texto: str = "", catalogo_texto: str = "", categoria_texto: str = ""):
     """Genera un reporte Excel profesional con resumen, detalle por producto y gráficos."""
     from collections import Counter
-    from openpyxl import Workbook
-    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.chart import PieChart, BarChart, Reference
     from openpyxl.utils import get_column_letter
+    Workbook = _OxlWorkbook
+    PatternFill = _OxlFill
+    Font = _OxlFont
+    Alignment = _OxlAlignment
+    Border = _OxlBorder
+    Side = _OxlSide
 
     wb = Workbook()
     total = len(RESULTADOS)
@@ -155,7 +303,7 @@ def generar_reporte_excel(acuerdo_texto: str = "", catalogo_texto: str = "", cat
     ac = Alignment(horizontal="center", vertical="center", wrap_text=False)
     al = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-    def celda(ws, row, col, value, fll=None, fnt=None, aln=None):
+    def celda(ws, row, col, value, fll=None, fnt=None, aln=None):  # noqa: E306
         c = ws.cell(row=row, column=col, value=value)
         if fll:
             c.fill = fll
@@ -1139,129 +1287,572 @@ class TextQueueLogHandler(logging.Handler):
             pass
 
 
+class _Tooltip:
+    """Tooltip sencillo que aparece al pasar el mouse sobre un widget."""
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self._tip = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+        widget.bind("<ButtonPress>", self._hide)
+
+    def _show(self, _event=None):
+        x, y, _, cy = self.widget.bbox("insert") if hasattr(self.widget, "bbox") else (0, 0, 0, 0)
+        x += self.widget.winfo_rootx() + 24
+        y += self.widget.winfo_rooty() + cy + 20
+        self._tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        lbl = tk.Label(
+            tw, text=self.text, justify="left",
+            background="#FFFBE6", foreground="#333333",
+            relief="flat", borderwidth=1,
+            font=("Segoe UI", 8),
+            wraplength=320, padx=6, pady=4,
+        )
+        lbl.pack()
+
+    def _hide(self, _event=None):
+        if self._tip:
+            self._tip.destroy()
+            self._tip = None
+
+
 class PeruComprasGUI:
+    # ── Paleta de colores ──────────────────────────────────────────────
+    C_FONDO       = "#F4F6FB"
+    C_HEADER      = "#00205B"
+    C_STEP_ACTIVE = "#1A73E8"
+    C_STEP_DONE   = "#34A853"
+    C_STEP_IDLE   = "#9AA0A6"
+    C_ACCION      = "#1A73E8"
+    C_PELIGRO     = "#D93025"
+    C_ADVERTENCIA = "#F29900"
+    C_TEXTO       = "#202124"
+    C_TEXTO_SUAVE = "#5F6368"
+    C_BORDE       = "#DADCE0"
+    C_LOGIN_BG    = "#FFF8E1"
+    C_LOGIN_BORDE = "#F29900"
+
     def __init__(self, root):
         self.root = root
-        self.root.title("Peru Compras Bot - Interfaz")
-        self.root.geometry("980x700")
+        self.root.configure(bg=self.C_FONDO)
 
         self.log_queue = Queue()
         self.login_event = threading.Event()
         self.worker = None
         self.reporte_generado = None
         self._pausado = False
+        self._total_productos = 0
+        self._procesados = 0
 
-        self.excel_var = tk.StringVar(value=str(Path(__file__).parent / "productos.xlsx"))
-        self.acuerdo_var = tk.StringVar(value=ACUERDO_TEXTO)
+        self.excel_var    = tk.StringVar(value=str(Path(__file__).parent / "productos.xlsx"))
+        self.acuerdo_var  = tk.StringVar(value=ACUERDO_TEXTO)
         self.catalogo_var = tk.StringVar(value=CATALOGO_TEXTO)
         self.categoria_var = tk.StringVar(value=CATEGORIA_TEXTO)
-        self.pausa_var = tk.StringVar(value=str(PAUSA_ENTRE_PRODUCTOS))
-        self.estado_var = tk.StringVar(value="Listo para iniciar")
+        self.pausa_var    = tk.StringVar(value=str(PAUSA_ENTRE_PRODUCTOS))
+        self.estado_var   = tk.StringVar(value="")
 
+        self._apply_theme()
         self._build_ui()
         self._configurar_logging_gui()
         self._tick_logs()
 
+    # ------------------------------------------------------------------
+    # Tema ttk personalizado
+    # ------------------------------------------------------------------
+    def _apply_theme(self):
+        style = ttk.Style(self.root)
+        # Usar 'clam' como base (compatible con Windows/Linux)
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        style.configure(".", font=("Segoe UI", 9), background=self.C_FONDO, foreground=self.C_TEXTO)
+        style.configure("TFrame",      background=self.C_FONDO)
+        style.configure("TLabel",      background=self.C_FONDO, foreground=self.C_TEXTO)
+        style.configure("TLabelframe", background=self.C_FONDO)
+        style.configure("TLabelframe.Label", background=self.C_FONDO, foreground=self.C_HEADER,
+                        font=("Segoe UI", 9, "bold"))
+        style.configure("TEntry",      fieldbackground="#FFFFFF", bordercolor=self.C_BORDE)
+        style.configure("TCombobox",   fieldbackground="#FFFFFF", bordercolor=self.C_BORDE)
+
+        # Botón principal (azul)
+        style.configure("Accion.TButton",
+                        background=self.C_ACCION, foreground="#FFFFFF",
+                        font=("Segoe UI", 10, "bold"),
+                        padding=(14, 8), relief="flat", borderwidth=0)
+        style.map("Accion.TButton",
+                  background=[("active", "#1557B0"), ("disabled", "#BDC1C6")],
+                  foreground=[("disabled", "#FFFFFF")])
+
+        # Botón secundario (gris)
+        style.configure("Secundario.TButton",
+                        background="#FFFFFF", foreground=self.C_TEXTO,
+                        font=("Segoe UI", 9),
+                        padding=(10, 6), relief="flat", borderwidth=1)
+        style.map("Secundario.TButton",
+                  background=[("active", "#E8EAED")])
+
+        # Botón peligro (rojo, detener)
+        style.configure("Peligro.TButton",
+                        background="#FDECEA", foreground=self.C_PELIGRO,
+                        font=("Segoe UI", 9, "bold"),
+                        padding=(10, 6), relief="flat", borderwidth=0)
+        style.map("Peligro.TButton",
+                  background=[("active", "#FAD2CF"), ("disabled", "#F5F5F5")],
+                  foreground=[("disabled", "#9AA0A6")])
+
+        # Botón advertencia (amarillo, pausa)
+        style.configure("Pausa.TButton",
+                        background="#FFF8E1", foreground=self.C_ADVERTENCIA,
+                        font=("Segoe UI", 9, "bold"),
+                        padding=(10, 6), relief="flat", borderwidth=0)
+        style.map("Pausa.TButton",
+                  background=[("active", "#FFF3CD"), ("disabled", "#F5F5F5")],
+                  foreground=[("disabled", "#9AA0A6")])
+
+        # Botón login (llamativo)
+        style.configure("Login.TButton",
+                        background=self.C_LOGIN_BG, foreground="#33691E",
+                        font=("Segoe UI", 10, "bold"),
+                        padding=(14, 10), relief="flat", borderwidth=2)
+        style.map("Login.TButton",
+                  background=[("active", "#F9FBE7"), ("disabled", "#F5F5F5")],
+                  foreground=[("disabled", "#9AA0A6")])
+
+        # Barra de progreso
+        style.configure("Verde.Horizontal.TProgressbar",
+                        troughcolor=self.C_BORDE,
+                        background=self.C_STEP_DONE,
+                        thickness=14)
+
+    # ------------------------------------------------------------------
+    # Construcción de la UI
+    # ------------------------------------------------------------------
     def _build_ui(self):
-        contenedor = ttk.Frame(self.root, padding=12)
-        contenedor.pack(fill="both", expand=True)
+        # ── Cabecera ──────────────────────────────────────────────────
+        header = tk.Frame(self.root, bg=self.C_HEADER, height=56)
+        header.pack(fill="x")
+        header.pack_propagate(False)
 
-        titulo = ttk.Label(
-            contenedor,
-            text="Peru Compras Bot (uso por clicks)",
-            font=("Segoe UI", 14, "bold"),
+        tk.Label(
+            header,
+            text="  Peru Compras Bot",
+            bg=self.C_HEADER, fg="#FFFFFF",
+            font=("Segoe UI", 15, "bold"),
+            anchor="w",
+        ).pack(side="left", padx=16, pady=10)
+
+        tk.Label(
+            header,
+            text="Automatización de actualización de stock",
+            bg=self.C_HEADER, fg="#A8C7FA",
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(0, 16), pady=18)
+
+        # ── Banda de estado (banner) ───────────────────────────────────
+        self._banner_frame = tk.Frame(self.root, bg="#E8F0FE", height=32)
+        self._banner_frame.pack(fill="x")
+        self._banner_frame.pack_propagate(False)
+        self._banner_lbl = tk.Label(
+            self._banner_frame, textvariable=self.estado_var,
+            bg="#E8F0FE", fg=self.C_STEP_ACTIVE,
+            font=("Segoe UI", 9, "italic"), anchor="w",
         )
-        titulo.pack(anchor="w", pady=(0, 8))
+        self._banner_lbl.pack(side="left", padx=16, pady=6)
 
-        estado = ttk.Label(contenedor, textvariable=self.estado_var)
-        estado.pack(anchor="w", pady=(0, 10))
+        # ── Contenedor principal con scroll ───────────────────────────
+        scroll_outer = tk.Frame(self.root, bg=self.C_FONDO)
+        scroll_outer.pack(fill="both", expand=True)
 
-        frame_excel = ttk.LabelFrame(contenedor, text="Archivo Excel", padding=10)
-        frame_excel.pack(fill="x", pady=(0, 10))
+        canvas = tk.Canvas(scroll_outer, bg=self.C_FONDO, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(scroll_outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
 
-        ttk.Label(frame_excel, text="Ruta del Excel:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frame_excel, textvariable=self.excel_var, width=85).grid(
-            row=1, column=0, padx=(0, 8), pady=(4, 0), sticky="we"
+        self._scroll_frame = tk.Frame(canvas, bg=self.C_FONDO)
+        self._scroll_win = canvas.create_window((0, 0), window=self._scroll_frame, anchor="nw")
+
+        def _on_resize(e):
+            canvas.itemconfig(self._scroll_win, width=e.width)
+        canvas.bind("<Configure>", _on_resize)
+
+        def _on_frame_configure(_e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        self._scroll_frame.bind("<Configure>", _on_frame_configure)
+
+        def _mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _mousewheel)
+
+        contenedor = self._scroll_frame
+
+        # ──────────────────────────────────────────────────────────────
+        # Helper local: crea un card numerado y devuelve el frame de contenido
+        #──────────────────────────────────────────────────────────────
+        def _card(num: str, title: str) -> tk.Frame:
+            outer = tk.Frame(contenedor, bg=self.C_FONDO)
+            outer.pack(fill="x", padx=20, pady=(0, 12))
+            tk.Label(
+                outer, text=num,
+                bg=self.C_STEP_ACTIVE, fg="#FFFFFF",
+                font=("Segoe UI", 10, "bold"), width=2, relief="flat",
+            ).pack(side="left", anchor="n", padx=(0, 10), pady=4)
+            card = tk.Frame(
+                outer, bg="#FFFFFF",
+                highlightbackground=self.C_BORDE, highlightthickness=1,
+            )
+            card.pack(side="left", fill="both", expand=True)
+            tk.Label(
+                card,
+                text=f"  Paso {num}  —  {title}",
+                bg=self.C_HEADER, fg="#FFFFFF",
+                font=("Segoe UI", 9, "bold"),
+                anchor="w", padx=10, pady=7,
+            ).pack(fill="x")
+            content = tk.Frame(card, bg="#FFFFFF")
+            content.pack(fill="x", padx=14, pady=10)
+            return content
+
+        # ════════════════════════════════════════════════════════════════
+        # PASO 1 — Archivo Excel
+        # ════════════════════════════════════════════════════════════════
+        f1 = _card("1", "Selecciona tu archivo de productos")
+
+        # Sub-panel: ¿Tienes plantilla?
+        aviso_plt = tk.Frame(f1, bg="#E8F5E9", bd=0, highlightbackground="#A5D6A7", highlightthickness=1)
+        aviso_plt.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            aviso_plt,
+            text="  ¿Primera vez? Descarga la plantilla de ejemplo, rellénala y luego selecciónala aquí.",
+            bg="#E8F5E9", fg="#2E7D32",
+            font=("Segoe UI", 8),
+            anchor="w",
+        ).pack(side="left", padx=6, pady=6)
+        btn_plt = ttk.Button(aviso_plt, text="⬇ Descargar plantilla",
+                             command=self._descargar_plantilla, style="Secundario.TButton")
+        btn_plt.pack(side="right", padx=8, pady=4)
+        _Tooltip(btn_plt, "Descarga un Excel de ejemplo con las columnas correctas\ny llénalo con tus productos.")
+
+        # Fila de selección
+        fila_excel = ttk.Frame(f1)
+        fila_excel.pack(fill="x")
+        fila_excel.columnconfigure(0, weight=1)
+
+        self.entry_excel = ttk.Entry(fila_excel, textvariable=self.excel_var, font=("Segoe UI", 9))
+        self.entry_excel.grid(row=0, column=0, sticky="we", padx=(0, 8))
+        btn_sel = ttk.Button(fila_excel, text="📂 Seleccionar archivo...",
+                             command=self._seleccionar_excel, style="Secundario.TButton")
+        btn_sel.grid(row=0, column=1)
+        _Tooltip(btn_sel, "Busca y selecciona tu archivo Excel (.xlsx)\ncon las columnas 'Parte' y 'Stock'.")
+
+        ttk.Label(
+            f1,
+            text="El archivo debe tener dos columnas: 'Parte' (código del producto) y 'Stock' (cantidad).",
+            foreground=self.C_TEXTO_SUAVE, font=("Segoe UI", 8),
+        ).pack(anchor="w", pady=(6, 0))
+
+        # ════════════════════════════════════════════════════════════════
+        # PASO 2 — Filtros del portal
+        # ════════════════════════════════════════════════════════════════
+        f2 = _card("2", "Configura los filtros del portal")
+
+        # Aviso "cargar desde el portal"
+        aviso_f = tk.Frame(f2, bg="#E3F2FD", bd=0, highlightbackground="#90CAF9", highlightthickness=1)
+        aviso_f.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            aviso_f,
+            text="  Si los desplegables están vacíos, usa el botón para traer las opciones directamente del portal.",
+            bg="#E3F2FD", fg="#1565C0",
+            font=("Segoe UI", 8), anchor="w",
+        ).pack(side="left", padx=6, pady=6)
+        self.btn_cargar_opts = ttk.Button(
+            aviso_f, text="🔄 Importar opciones del portal",
+            command=self._cargar_opciones, style="Secundario.TButton",
         )
-        ttk.Button(frame_excel, text="Seleccionar Excel", command=self._seleccionar_excel).grid(
-            row=1, column=1, pady=(4, 0)
+        self.btn_cargar_opts.pack(side="right", padx=8, pady=4)
+        _Tooltip(
+            self.btn_cargar_opts,
+            "Abre Chrome, te pedirá que inicies sesión y luego\n"
+            "cargará automáticamente los Acuerdos, Catálogos\n"
+            "y Categorías disponibles en el portal.",
         )
-        frame_excel.columnconfigure(0, weight=1)
 
-        frame_filtros = ttk.LabelFrame(contenedor, text="Filtros", padding=10)
-        frame_filtros.pack(fill="x", pady=(0, 10))
+        grid_f = tk.Frame(f2, bg="#FFFFFF")
+        grid_f.pack(fill="x")
+        grid_f.columnconfigure(1, weight=1)
 
-        ttk.Label(frame_filtros, text="Acuerdo Marco:").grid(row=0, column=0, sticky="w")
-        self.combo_acuerdo = ttk.Combobox(frame_filtros, textvariable=self.acuerdo_var, width=78)
-        self.combo_acuerdo.grid(row=0, column=1, sticky="we", padx=(8, 0), pady=(0, 6))
-        self.combo_acuerdo.bind("<<ComboboxSelected>>", self._on_acuerdo_changed)
-
-        ttk.Label(frame_filtros, text="Catálogo:").grid(row=1, column=0, sticky="w")
-        self.combo_catalogo = ttk.Combobox(frame_filtros, textvariable=self.catalogo_var, width=78)
-        self.combo_catalogo.grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(0, 6))
+        labels_filtros = ["Acuerdo Marco:", "Catálogo:", "Categoría:"]
+        tips_filtros = [
+            "Selecciona el Acuerdo Marco al que pertenecen tus productos.\nEjemplo: EXT-CE-2022-5 COMPUTADORAS DE ESCRITORIO",
+            "Selecciona el Catálogo Electrónico correspondiente.\nEjemplo: COMPUTADORAS DE ESCRITORIO",
+            "Selecciona la Categoría específica dentro del catálogo.\nEjemplo: MONITOR",
+        ]
+        self.combo_acuerdo  = self._make_combo_row(grid_f, 0, labels_filtros[0], self.acuerdo_var,  tips_filtros[0])
+        self.combo_catalogo = self._make_combo_row(grid_f, 1, labels_filtros[1], self.catalogo_var, tips_filtros[1])
+        self.combo_categoria = self._make_combo_row(grid_f, 2, labels_filtros[2], self.categoria_var, tips_filtros[2])
+        self.combo_acuerdo.bind("<<ComboboxSelected>>",  self._on_acuerdo_changed)
         self.combo_catalogo.bind("<<ComboboxSelected>>", self._on_catalogo_changed)
 
-        ttk.Label(frame_filtros, text="Categoría:").grid(row=2, column=0, sticky="w")
-        self.combo_categoria = ttk.Combobox(frame_filtros, textvariable=self.categoria_var, width=78)
-        self.combo_categoria.grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(0, 6))
-
-        ttk.Label(frame_filtros, text="Pausa entre productos (seg):").grid(
-            row=3, column=0, sticky="w"
+        # Configuración avanzada (colapsable)
+        self._avanzado_visible = tk.BooleanVar(value=False)
+        btn_avanzado = ttk.Button(
+            f2, text="⚙ Configuración avanzada ▸",
+            command=self._toggle_avanzado, style="Secundario.TButton",
         )
-        ttk.Entry(frame_filtros, textvariable=self.pausa_var, width=10).grid(
-            row=3, column=1, sticky="w", padx=(8, 0)
+        btn_avanzado.pack(anchor="w", pady=(8, 0))
+        self._btn_avanzado = btn_avanzado
+
+        self._frame_avanzado = tk.Frame(f2, bg="#FFFFFF")
+        # (No se hace pack aquí; se muestra solo si el usuario lo abre)
+        av_lbl = ttk.Label(self._frame_avanzado, text="Pausa entre productos (segundos):",
+                           foreground=self.C_TEXTO_SUAVE, font=("Segoe UI", 8))
+        av_lbl.pack(side="left", pady=(4, 0))
+        av_entry = ttk.Entry(self._frame_avanzado, textvariable=self.pausa_var, width=6)
+        av_entry.pack(side="left", padx=8, pady=(4, 0))
+        _Tooltip(av_entry,
+                 "Tiempo de espera entre cada producto (en segundos).\n"
+                 "Valor por defecto: 2. Auméntalo si el portal responde lento.")
+
+        # ════════════════════════════════════════════════════════════════
+        # PASO 3 — Ejecutar
+        # ════════════════════════════════════════════════════════════════
+        f3 = _card("3", "Inicia la automatización")
+
+        # Botón principal de inicio
+        self.btn_iniciar = ttk.Button(
+            f3, text="▶  Iniciar actualización de stock",
+            command=self._iniciar, style="Accion.TButton",
         )
+        self.btn_iniciar.pack(fill="x", ipady=4, pady=(0, 10))
+        _Tooltip(self.btn_iniciar,
+                 "Abre Chrome, te pedirá que inicies sesión\n"
+                 "y luego actualizará el stock de todos los productos de tu Excel.")
 
-        self.btn_cargar_opts = ttk.Button(
-            frame_filtros, text="Cargar opciones del portal", command=self._cargar_opciones
+        # Panel de login (visible solo cuando Chrome espera login)
+        self._panel_login = tk.Frame(
+            f3, bg=self.C_LOGIN_BG, bd=0,
+            highlightbackground=self.C_LOGIN_BORDE, highlightthickness=2,
         )
-        self.btn_cargar_opts.grid(row=4, column=0, columnspan=2, pady=(10, 0), sticky="w")
-        ttk.Label(
-            frame_filtros,
-            text="Inicia sesión manualmente cuando Chrome se abra, igual que al iniciar la automatización.",
-            foreground="#666666",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        # No se empaca aún – aparece solo cuando se necesita
+        tk.Label(
+            self._panel_login,
+            text="⏳  El bot está esperando que inicies sesión en Chrome",
+            bg=self.C_LOGIN_BG, fg="#7B5800",
+            font=("Segoe UI", 10, "bold"), anchor="w",
+        ).pack(anchor="w", padx=14, pady=(10, 4))
+        tk.Label(
+            self._panel_login,
+            text="1. Ve a la ventana de Chrome que se abrió.\n"
+                 "2. Escribe tu RUC, usuario y contraseña.\n"
+                 "3. Haz clic en 'Ingresar'.\n"
+                 "4. Regresa aquí y haz clic en el botón verde de abajo.",
+            bg=self.C_LOGIN_BG, fg="#5D4037",
+            font=("Segoe UI", 9), anchor="w", justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+        self.btn_login = ttk.Button(
+            self._panel_login,
+            text="✅  Ya inicié sesión — continuar",
+            command=self._continuar_login,
+            style="Login.TButton",
+        )
+        self.btn_login.pack(fill="x", padx=14, pady=(0, 12), ipady=2)
 
-        frame_filtros.columnconfigure(1, weight=1)
+        # Panel de controles de ejecución (visible durante proceso)
+        self._panel_ctrl = tk.Frame(f3, bg="#FFFFFF")
+        # No se empaca aún
 
-        frame_acciones = ttk.Frame(contenedor)
-        frame_acciones.pack(fill="x", pady=(0, 10))
+        # Barra de progreso
+        prog_frame = tk.Frame(self._panel_ctrl, bg="#FFFFFF")
+        prog_frame.pack(fill="x", pady=(0, 6))
+        self._lbl_progreso = tk.Label(
+            prog_frame, text="Preparando...",
+            bg="#FFFFFF", fg=self.C_TEXTO_SUAVE, font=("Segoe UI", 8),
+        )
+        self._lbl_progreso.pack(anchor="w")
+        self.progress = ttk.Progressbar(
+            prog_frame, orient="horizontal", mode="determinate",
+            style="Verde.Horizontal.TProgressbar",
+        )
+        self.progress.pack(fill="x", pady=(2, 0))
 
-        self.btn_iniciar = ttk.Button(frame_acciones, text="▶ Iniciar automatización", command=self._iniciar)
-        self.btn_iniciar.pack(side="left", padx=(0, 8))
-
+        # Botones Pausar / Detener
+        ctrl_btns = tk.Frame(self._panel_ctrl, bg="#FFFFFF")
+        ctrl_btns.pack(fill="x", pady=(6, 0))
         self.btn_pausar = ttk.Button(
-            frame_acciones, text="⏸ Pausar", command=self._pausar_reanudar, state="disabled"
+            ctrl_btns, text="⏸  Pausar",
+            command=self._pausar_reanudar, style="Pausa.TButton",
         )
         self.btn_pausar.pack(side="left", padx=(0, 8))
+        _Tooltip(self.btn_pausar, "Pausa el proceso después de que termine el producto actual.\nPuedes reanudarlo cuando quieras.")
 
         self.btn_detener = ttk.Button(
-            frame_acciones, text="⏹ Detener", command=self._detener, state="disabled"
+            ctrl_btns, text="⏹  Detener y generar reporte",
+            command=self._detener, style="Peligro.TButton",
         )
-        self.btn_detener.pack(side="left", padx=(0, 8))
+        self.btn_detener.pack(side="left")
+        _Tooltip(self.btn_detener, "Detiene el proceso y genera el reporte Excel\ncon los resultados hasta el momento.")
 
-        self.btn_login = ttk.Button(
-            frame_acciones,
-            text="Ya inicié sesión (continuar)",
-            command=self._continuar_login,
-            state="disabled",
+        # ════════════════════════════════════════════════════════════════
+        # PANEL DE RESULTADO (visible cuando termina)
+        # ════════════════════════════════════════════════════════════════
+        self._panel_resultado = tk.Frame(
+            contenedor, bg="#E8F5E9", bd=0,
+            highlightbackground="#A5D6A7", highlightthickness=2,
         )
-        self.btn_login.pack(side="left", padx=(0, 8))
+        # No se empaca aún
 
-        ttk.Button(frame_acciones, text="Abrir carpeta", command=self._abrir_carpeta).pack(
-            side="left", padx=(0, 8)
+        tk.Label(
+            self._panel_resultado,
+            text="✅  ¡Proceso completado exitosamente!",
+            bg="#E8F5E9", fg="#1B5E20",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w", padx=14, pady=(12, 4))
+
+        self._lbl_resultado_info = tk.Label(
+            self._panel_resultado,
+            text="", bg="#E8F5E9", fg="#2E7D32",
+            font=("Segoe UI", 9), anchor="w", justify="left",
         )
-        ttk.Button(frame_acciones, text="Abrir reporte", command=self._abrir_reporte).pack(
-            side="left", padx=(0, 8)
+        self._lbl_resultado_info.pack(anchor="w", padx=14, pady=(0, 6))
+
+        res_btns = tk.Frame(self._panel_resultado, bg="#E8F5E9")
+        res_btns.pack(anchor="w", padx=14, pady=(0, 12))
+        self.btn_abrir_reporte = ttk.Button(
+            res_btns, text="📊  Abrir reporte Excel",
+            command=self._abrir_reporte, style="Accion.TButton",
         )
-        ttk.Button(frame_acciones, text="Ver aprendizaje", command=self._ver_aprendizaje).pack(side="left")
+        self.btn_abrir_reporte.pack(side="left", padx=(0, 10))
+        ttk.Button(
+            res_btns, text="📁  Abrir carpeta",
+            command=self._abrir_carpeta, style="Secundario.TButton",
+        ).pack(side="left")
 
-        frame_log = ttk.LabelFrame(contenedor, text="Ejecución en tiempo real", padding=10)
-        frame_log.pack(fill="both", expand=True)
+        # ════════════════════════════════════════════════════════════════
+        # LOG — actividad en tiempo real (colapsable)
+        # ════════════════════════════════════════════════════════════════
+        log_header = tk.Frame(contenedor, bg=self.C_FONDO)
+        log_header.pack(fill="x", padx=20, pady=(0, 4))
 
-        self.txt_log = scrolledtext.ScrolledText(frame_log, height=20, wrap="word", state="disabled")
+        self._log_visible = tk.BooleanVar(value=False)
+        self._btn_toggle_log = ttk.Button(
+            log_header, text="📋  Ver actividad detallada ▸",
+            command=self._toggle_log, style="Secundario.TButton",
+        )
+        self._btn_toggle_log.pack(side="left")
+        _Tooltip(self._btn_toggle_log,
+                 "Muestra/oculta el registro técnico en tiempo real.\n"
+                 "Útil para ver qué está haciendo el bot en cada momento.")
+
+        ttk.Button(
+            log_header, text="📈  Estadísticas de errores",
+            command=self._ver_aprendizaje, style="Secundario.TButton",
+        ).pack(side="left", padx=(10, 0))
+
+        self._frame_log = ttk.LabelFrame(contenedor, text="Actividad en tiempo real", padding=8)
+        # Oculto por defecto
+
+        self.txt_log = scrolledtext.ScrolledText(
+            self._frame_log, height=16, wrap="word", state="disabled",
+            font=("Consolas", 8), background="#1E1E1E", foreground="#D4D4D4",
+            insertbackground="#FFFFFF",
+        )
         self.txt_log.pack(fill="both", expand=True)
 
+        # Colorear líneas del log
+        self.txt_log.tag_configure("error",   foreground="#F48771")
+        self.txt_log.tag_configure("warning", foreground="#FFD700")
+        self.txt_log.tag_configure("ok",      foreground="#89D185")
+        self.txt_log.tag_configure("paso",    foreground="#9CDCFE", font=("Consolas", 8, "bold"))
+
+        # ── Pie de página ──────────────────────────────────────────────
+        tk.Frame(contenedor, bg=self.C_BORDE, height=1).pack(fill="x", padx=20, pady=(14, 0))
+        tk.Label(
+            contenedor,
+            text="Peru Compras Bot  •  Uso exclusivo interno",
+            bg=self.C_FONDO, fg=self.C_TEXTO_SUAVE,
+            font=("Segoe UI", 7),
+        ).pack(pady=(4, 12))
+
+    # ------------------------------------------------------------------
+    # Helpers de construcción
+    # ------------------------------------------------------------------
+    # (_make_step_frame removed — step cards are built inline in _build_ui via _card())
+
+    def _make_combo_row(self, parent, row: int, label: str, variable: tk.StringVar, tip: str) -> ttk.Combobox:
+        tk.Label(parent, text=label, bg="#FFFFFF",
+                 font=("Segoe UI", 9), fg=self.C_TEXTO).grid(
+            row=row, column=0, sticky="w", padx=(0, 10), pady=4,
+        )
+        combo = ttk.Combobox(parent, textvariable=variable, state="normal")
+        combo.grid(row=row, column=1, sticky="we", pady=4)
+        _Tooltip(combo, tip)
+        return combo
+
+    def _toggle_avanzado(self):
+        if self._avanzado_visible.get():
+            self._frame_avanzado.pack_forget()
+            self._btn_avanzado.configure(text="⚙ Configuración avanzada ▸")
+            self._avanzado_visible.set(False)
+        else:
+            self._frame_avanzado.pack(anchor="w", pady=(4, 0))
+            self._btn_avanzado.configure(text="⚙ Configuración avanzada ▾")
+            self._avanzado_visible.set(True)
+
+    def _toggle_log(self):
+        if self._log_visible.get():
+            self._frame_log.pack_forget()
+            self._btn_toggle_log.configure(text="📋  Ver actividad detallada ▸")
+            self._log_visible.set(False)
+        else:
+            self._frame_log.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+            self._btn_toggle_log.configure(text="📋  Ocultar actividad detallada ▾")
+            self._log_visible.set(True)
+
+    # ------------------------------------------------------------------
+    # Actualización de estado visual
+    # ------------------------------------------------------------------
+    def _set_banner(self, msg: str, color_bg: str = "#E8F0FE", color_fg: str = None):
+        self._banner_frame.configure(bg=color_bg)
+        self._banner_lbl.configure(bg=color_bg, fg=color_fg or self.C_STEP_ACTIVE)
+        self.estado_var.set(f"  {msg}")
+
+    def _mostrar_panel_login(self, mostrar: bool):
+        if mostrar:
+            self._panel_login.pack(fill="x", pady=(0, 8))
+        else:
+            self._panel_login.pack_forget()
+
+    def _mostrar_panel_ctrl(self, mostrar: bool):
+        if mostrar:
+            self._panel_ctrl.pack(fill="x")
+        else:
+            self._panel_ctrl.pack_forget()
+
+    def _mostrar_panel_resultado(self, mostrar: bool):
+        if mostrar:
+            self._panel_resultado.pack(fill="x", padx=20, pady=(0, 14))
+        else:
+            self._panel_resultado.pack_forget()
+
+    def _actualizar_progreso(self, procesados: int, total: int, estado_txt: str = ""):
+        if total > 0:
+            self.progress["maximum"] = total
+            self.progress["value"] = procesados
+            pct = int(procesados / total * 100)
+            self._lbl_progreso.configure(
+                text=f"Producto {procesados} de {total}  ({pct}%)  {estado_txt}"
+            )
+        else:
+            self.progress["value"] = 0
+            self._lbl_progreso.configure(text=estado_txt or "Preparando...")
+
+    # ------------------------------------------------------------------
+    # Logging con color
+    # ------------------------------------------------------------------
     def _configurar_logging_gui(self):
         self.gui_handler = TextQueueLogHandler(self.log_queue)
         self.gui_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
@@ -1272,14 +1863,42 @@ class PeruComprasGUI:
             while True:
                 msg = self.log_queue.get_nowait()
                 self.txt_log.configure(state="normal")
-                self.txt_log.insert("end", msg + "\n")
+                msg_lower = msg.lower()
+                if "[error]" in msg_lower:
+                    tag = "error"
+                elif "[warning]" in msg_lower:
+                    tag = "warning"
+                elif "[ok]" in msg_lower or "exito" in msg_lower or "exitosamente" in msg_lower:
+                    tag = "ok"
+                elif "paso" in msg_lower or "=" * 10 in msg:
+                    tag = "paso"
+                else:
+                    tag = ""
+                self.txt_log.insert("end", msg + "\n", tag)
                 self.txt_log.see("end")
                 self.txt_log.configure(state="disabled")
+
+                # Extraer progreso del mensaje de log
+                # Formato esperado: "--- Producto X/Y: ..."
+                import re as _re
+                m = _re.search(r"Producto (\d+)/(\d+)", msg)
+                if m:
+                    proc, tot = int(m.group(1)), int(m.group(2))
+                    self._procesados = proc
+                    self._total_productos = tot
+                    self.root.after(0, lambda p=proc, t=tot: self._actualizar_progreso(p, t))
+
                 if "PASO" in msg:
-                    self.estado_var.set(msg.split("] ", 1)[-1])
+                    txt = msg.split("] ", 1)[-1]
+                    self._set_banner(txt)
+
+                # Detectar login completado (para ocultar panel login)
+                if "login confirmado" in msg_lower or "login completado" in msg_lower:
+                    self.root.after(0, lambda: self._mostrar_panel_login(False))
+
         except Empty:
             pass
-        self.root.after(200, self._tick_logs)
+        self.root.after(150, self._tick_logs)
 
     def _seleccionar_excel(self):
         ruta = filedialog.askopenfilename(
@@ -1289,6 +1908,29 @@ class PeruComprasGUI:
         )
         if ruta:
             self.excel_var.set(ruta)
+            self._set_banner(f"Archivo seleccionado: {Path(ruta).name}", "#E8F0FE")
+
+    def _descargar_plantilla(self):
+        destino = filedialog.asksaveasfilename(
+            title="Guardar plantilla como…",
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile="plantilla_productos.xlsx",
+            initialdir=str(Path(__file__).parent),
+        )
+        if not destino:
+            return
+        try:
+            generar_plantilla_excel(Path(destino))
+            if messagebox.askyesno(
+                "Plantilla creada",
+                f"Plantilla guardada en:\n{destino}\n\n"
+                "¿Quieres abrir el archivo ahora para revisarlo?",
+            ):
+                os.startfile(destino)
+            self.excel_var.set(destino)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo crear la plantilla:\n{e}")
 
     def _abrir_carpeta(self):
         os.startfile(str(Path(__file__).parent))
@@ -1301,38 +1943,32 @@ class PeruComprasGUI:
 
     def _continuar_login(self):
         self.login_event.set()
-        self.btn_login.configure(state="disabled")
-        self.estado_var.set("Login confirmado. Continuando proceso...")
+        self.root.after(0, lambda: self._mostrar_panel_login(False))
+        self._set_banner("Login confirmado — el bot continúa...", "#E8F5E9", "#1B5E20")
 
     def _notificar_login_ui(self):
         def _update():
-            self.btn_login.configure(state="normal")
-            self.estado_var.set("Completa login en Chrome y luego haz click en 'Ya inicié sesión'")
-            messagebox.showinfo(
-                "Acción requerida",
-                "1) Inicia sesión en la web en la ventana de Chrome.\n"
-                "2) Haz clic en 'Ingresar'.\n"
-                "3) Regresa aquí y haz clic en 'Ya inicié sesión (continuar)'.",
+            self._mostrar_panel_login(True)
+            self._set_banner(
+                "Inicia sesión en Chrome y luego haz clic en el botón verde",
+                self.C_LOGIN_BG, "#7B5800",
             )
-
         self.root.after(0, _update)
 
     # ------------------------------------------------------------------
     # Cascada de filtros
     # ------------------------------------------------------------------
     def _on_acuerdo_changed(self, event=None):
-        """Al cambiar el Acuerdo, los catálogos/categorías ya no son válidos."""
         self.combo_catalogo["values"] = []
         self.catalogo_var.set("")
         self.combo_categoria["values"] = []
         self.categoria_var.set("")
-        self.estado_var.set("Acuerdo cambiado — haz clic en 'Cargar opciones del portal' para actualizar los filtros")
+        self._set_banner("Acuerdo cambiado — usa '🔄 Importar opciones del portal' para actualizar los filtros")
 
     def _on_catalogo_changed(self, event=None):
-        """Al cambiar el Catálogo, la categoría ya no es válida."""
         self.combo_categoria["values"] = []
         self.categoria_var.set("")
-        self.estado_var.set("Catálogo cambiado — haz clic en 'Cargar opciones del portal' para actualizar categorías")
+        self._set_banner("Catálogo cambiado — usa '🔄 Importar opciones del portal' para actualizar categorías")
 
     # ------------------------------------------------------------------
     # Cargar opciones desde el portal
@@ -1344,8 +1980,7 @@ class PeruComprasGUI:
         self.login_event.clear()
         self.btn_cargar_opts.configure(state="disabled")
         self.btn_iniciar.configure(state="disabled")
-        self.btn_login.configure(state="disabled")
-        self.estado_var.set("Conectando al portal para cargar opciones...")
+        self._set_banner("Abriendo Chrome para conectarse al portal...", "#E3F2FD", "#1565C0")
         self.worker = threading.Thread(target=self._cargar_opciones_worker, daemon=True)
         self.worker.start()
 
@@ -1416,7 +2051,6 @@ class PeruComprasGUI:
                     pass
             self.root.after(0, lambda: self.btn_cargar_opts.configure(state="normal"))
             self.root.after(0, lambda: self.btn_iniciar.configure(state="normal"))
-            self.root.after(0, lambda: self.btn_login.configure(state="disabled"))
 
     def _actualizar_combos(self, acuerdos, catalogos, categorias):
         self.combo_acuerdo["values"] = acuerdos
@@ -1431,16 +2065,17 @@ class PeruComprasGUI:
         if categorias and not self.categoria_var.get():
             self.categoria_var.set(categorias[0])
 
-        self.estado_var.set(
-            f"Listo — {len(acuerdos)} acuerdos, {len(catalogos)} catálogos, {len(categorias)} categorías cargados"
+        self._set_banner(
+            f"✅  Filtros cargados — {len(acuerdos)} acuerdos, {len(catalogos)} catálogos, {len(categorias)} categorías",
+            "#E8F5E9", "#2E7D32",
         )
         messagebox.showinfo(
-            "Opciones cargadas",
-            f"Se cargaron correctamente desde el portal:\n"
+            "Filtros cargados",
+            f"Se cargaron desde el portal:\n"
             f"  • {len(acuerdos)} Acuerdo(s) Marco\n"
             f"  • {len(catalogos)} Catálogo(s)\n"
             f"  • {len(categorias)} Categoría(s)\n\n"
-            f"Ahora puedes seleccionar cada filtro desde el desplegable.",
+            f"Ahora selecciona los valores correctos en los desplegables del Paso 2.",
         )
 
     # ------------------------------------------------------------------
@@ -1451,41 +2086,42 @@ class PeruComprasGUI:
             if PAUSA_EVENTO:
                 PAUSA_EVENTO.clear()
             self._pausado = True
-            self.btn_pausar.configure(text="▶ Reanudar")
-            self.estado_var.set("⏸ En pausa — haz clic en 'Reanudar' para continuar")
+            self.btn_pausar.configure(text="▶  Reanudar")
+            self._set_banner("⏸  En pausa — haz clic en 'Reanudar' para continuar", self.C_LOGIN_BG, "#7B5800")
             log.info("⏸ Ejecución pausada por el usuario.")
         else:
             if PAUSA_EVENTO:
                 PAUSA_EVENTO.set()
             self._pausado = False
-            self.btn_pausar.configure(text="⏸ Pausar")
-            self.estado_var.set("▶ Reanudando...")
+            self.btn_pausar.configure(text="⏸  Pausar")
+            self._set_banner("▶  Reanudando proceso...", "#E8F0FE")
             log.info("▶ Ejecución reanudada por el usuario.")
 
     def _detener(self):
         if not messagebox.askyesno(
             "Detener proceso",
-            "¿Detener la automatización?\n\n"
-            "Se generará el reporte con los resultados hasta ahora.",
+            "¿Seguro que quieres detener la automatización?\n\n"
+            "Se generará el reporte Excel con los resultados hasta el momento.",
         ):
             return
         if DETENER_EVENTO:
             DETENER_EVENTO.set()
         if PAUSA_EVENTO:
-            PAUSA_EVENTO.set()   # desbloquear si estaba en pausa
+            PAUSA_EVENTO.set()
         self._pausado = False
-        self.btn_pausar.configure(text="⏸ Pausar")
-        self.btn_detener.configure(state="disabled")
-        self.estado_var.set("⏹ Deteniendo... (terminará el producto actual)")
-        log.info("⏹ Detección solicitada por el usuario.")
+        self.btn_pausar.configure(text="⏸  Pausar")
+        self._set_banner("⏹  Deteniendo — se terminará el producto actual y se generará el reporte",
+                         "#FFF3E0", "#E65100")
+        log.info("⏹ Detener solicitado por el usuario.")
 
     def _ver_aprendizaje(self):
         arch = Path(__file__).parent / "aprendizaje.json"
         if not arch.exists():
             messagebox.showinfo(
-                "Aprendizaje",
-                "Aún no hay datos de aprendizaje.\n"
-                "El bot comienza a registrar patrones de error durante la primera ejecución.",
+                "Estadísticas de errores",
+                "Aún no hay datos registrados.\n\n"
+                "El bot guarda estadísticas de cada error que encuentra.\n"
+                "Después de la primera ejecución aparecerán aquí.",
             )
             return
         try:
@@ -1493,24 +2129,25 @@ class PeruComprasGUI:
             acum = data.get("acumulado", {})
             sesion = data.get("ultima_sesion", "Desconocida")
             if not acum:
-                messagebox.showinfo("Aprendizaje", "Aún no se han registrado errores.")
+                messagebox.showinfo("Estadísticas", "Aún no se han registrado errores.")
                 return
-            lineas = [f"\u00daltima sesión: {sesion}\n", "Errores acumulados (histórico):"]
+            lineas = [
+                f"Última sesión: {sesion}\n",
+                "Errores encontrados (histórico):",
+            ]
             for tipo, cnt in sorted(acum.items(), key=lambda x: -x[1]):
-                marca = " ← AJUSTE ACTIVO" if cnt >= AnalizadorFallos.UMBRAL else ""
-                lineas.append(f"  • {tipo}: {cnt} vez/veces{marca}")
+                estado = " ✔ ajuste activo" if cnt >= AnalizadorFallos.UMBRAL else ""
+                lineas.append(f"  • {tipo}: {cnt} vez/veces{estado}")
             lineas += [
                 "",
-                f"Los ajustes se activan cuando un mismo fallo se repite {AnalizadorFallos.UMBRAL}+ veces:",
-                "  • Timeout → +5s de espera extra por producto",
-                "  • Modal no abre → ejecución JS directa para modal",
-                "  • Producto no encontrado → recarga de filtros antes de buscar",
+                f"Cuando un error se repite {AnalizadorFallos.UMBRAL}+ veces, el bot ajusta",
+                "automáticamente su comportamiento para evitarlo.",
                 "",
-                "Para resetear: elimina el archivo 'aprendizaje.json'.",
+                "Para reiniciar las estadísticas: elimina el archivo 'aprendizaje.json'.",
             ]
-            messagebox.showinfo("Estado de Aprendizaje", "\n".join(lineas))
+            messagebox.showinfo("Estadísticas de errores", "\n".join(lineas))
         except Exception as e:
-            messagebox.showerror("Error", f"No se pudo leer el archivo de aprendizaje:\n{e}")
+            messagebox.showerror("Error", f"No se pudo leer el archivo:\n{e}")
 
     def _iniciar(self):
         excel = Path(self.excel_var.get().strip())
@@ -1520,26 +2157,37 @@ class PeruComprasGUI:
         pausa_txt = self.pausa_var.get().strip()
 
         if not excel.exists():
-            messagebox.showerror("Validación", "El archivo Excel no existe. Selecciona un archivo válido.")
+            messagebox.showerror(
+                "Archivo no encontrado",
+                f"No se encontró el archivo:\n{excel}\n\n"
+                "Haz clic en '📂 Seleccionar archivo...' para elegir tu Excel."
+            )
             return
         if not acuerdo or not catalogo or not categoria:
-            messagebox.showerror("Validación", "Completa Acuerdo, Catálogo y Categoría.")
+            messagebox.showerror(
+                "Filtros incompletos",
+                "Debes completar los tres filtros del Paso 2:\n"
+                "  • Acuerdo Marco\n  • Catálogo\n  • Categoría\n\n"
+                "Usa '🔄 Importar opciones del portal' si los desplegables están vacíos."
+            )
             return
         try:
             pausa = int(pausa_txt)
             if pausa < 0:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("Validación", "La pausa debe ser un número entero >= 0.")
+            messagebox.showerror("Valor inválido", "La pausa debe ser un número entero mayor o igual a 0.")
             return
 
+        # Resetear UI de resultado anterior
+        self._mostrar_panel_resultado(False)
+        self._mostrar_panel_ctrl(True)
+        self._mostrar_panel_login(False)
+        self._actualizar_progreso(0, 0, "Iniciando...")
         self.btn_iniciar.configure(state="disabled")
-        self.btn_pausar.configure(state="normal")
-        self.btn_detener.configure(state="normal")
-        self.btn_login.configure(state="disabled")
+        self.btn_pausar.configure(text="⏸  Pausar")
         self._pausado = False
-        self.btn_pausar.configure(text="⏸ Pausar")
-        self.estado_var.set("Iniciando automatización...")
+        self._set_banner("▶  Iniciando automatización — abriendo Chrome...", "#E8F0FE")
 
         self.worker = threading.Thread(
             target=self._worker_run,
@@ -1554,8 +2202,8 @@ class PeruComprasGUI:
         EVENTO_LOGIN = self.login_event
         GUI_NOTIFICAR_LOGIN = self._notificar_login_ui
         PAUSA_EVENTO = threading.Event()
-        PAUSA_EVENTO.set()        # inicia sin pausa
-        DETENER_EVENTO = threading.Event()  # inicia sin detección
+        PAUSA_EVENTO.set()
+        DETENER_EVENTO = threading.Event()
 
         try:
             reporte = ejecutar_bot(
@@ -1566,24 +2214,47 @@ class PeruComprasGUI:
                 pausa_entre_productos=pausa,
             )
             self.reporte_generado = reporte
-            self.root.after(0, lambda: self.estado_var.set(f"Finalizado. Reporte: {reporte}"))
-            self.root.after(0, lambda: messagebox.showinfo("Proceso completado", f"Proceso finalizado.\nReporte: {reporte}"))
+            total = len(RESULTADOS)
+            exitos = sum(1 for r in RESULTADOS if r["Estado"] == "EXITO")
+            fallos = total - exitos
+            info = (
+                f"{exitos} producto(s) actualizados correctamente"
+                + (f"   ·   {fallos} con error(es)" if fallos else "")
+                + f"\n\nReporte guardado en:\n{reporte}"
+            )
+            self.root.after(0, lambda: self._lbl_resultado_info.configure(text=info))
+            self.root.after(0, lambda: self._mostrar_panel_ctrl(False))
+            self.root.after(0, lambda: self._mostrar_panel_resultado(True))
+            self.root.after(0, lambda: self._set_banner(
+                f"✅  Proceso completado — {exitos}/{total} productos actualizados",
+                "#E8F5E9", "#1B5E20",
+            ))
+            self.root.after(0, lambda: self._actualizar_progreso(total, total, "Completado"))
         except Exception as e:
             detalle = f"{e}\n\n{traceback.format_exc()}"
             log.error(f"Error fatal: {e}", exc_info=True)
-            self.root.after(0, lambda: self.estado_var.set("Error en la ejecución"))
-            self.root.after(0, lambda: messagebox.showerror("Error", detalle))
+            self.root.after(0, lambda: self._set_banner(
+                "❌  Error en la ejecución — revisa la actividad detallada",
+                "#FDECEA", self.C_PELIGRO,
+            ))
+            self.root.after(0, lambda: messagebox.showerror("Error inesperado", detalle))
         finally:
             self.root.after(0, lambda: self.btn_iniciar.configure(state="normal"))
-            self.root.after(0, lambda: self.btn_pausar.configure(state="disabled", text="⏸ Pausar"))
-            self.root.after(0, lambda: self.btn_detener.configure(state="disabled"))
-            self.root.after(0, lambda: self.btn_login.configure(state="disabled"))
             self._pausado = False
 
 
 def iniciar_interfaz():
     root = tk.Tk()
-    PeruComprasGUI(root)
+    root.title("Peru Compras Bot")
+    root.geometry("860x720")
+    root.minsize(700, 560)
+    root.resizable(True, True)
+
+    root.withdraw()
+    root.update_idletasks()
+    root.deiconify()
+
+    app = PeruComprasGUI(root)
     root.mainloop()
 
 
