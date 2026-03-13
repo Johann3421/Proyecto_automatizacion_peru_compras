@@ -1,0 +1,1375 @@
+# -*- coding: utf-8 -*-
+"""
+peru_compras_bot.py
+Automatiza la actualización de stock en catalogos.perucompras.gob.pe
+
+Requisitos:
+    pip install selenium pandas openpyxl
+
+Uso:
+    python peru_compras_bot.py
+"""
+
+from dataclasses import dataclass, field
+import json
+import logging
+import re
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+from openpyxl import Workbook as _OxlWorkbook
+from openpyxl.styles import (
+    PatternFill as _OxlFill, Font as _OxlFont,
+    Alignment as _OxlAlignment, Border as _OxlBorder, Side as _OxlSide,
+)
+from selenium import webdriver
+from selenium.common.exceptions import (
+    NoAlertPresentException,
+    NoSuchElementException,
+    StaleElementReferenceException,
+    TimeoutException,
+    UnexpectedAlertPresentException,
+)
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import Select, WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+# ---------------------------------------------------------------------------
+# CONFIGURACION - Ajusta estas variables segun tu entorno
+# ---------------------------------------------------------------------------
+EXCEL_PATH = BASE_DIR / "productos.xlsx"  # Ruta al archivo Excel
+BASE_URL = "https://www.catalogos.perucompras.gob.pe"
+LOGIN_URL = f"{BASE_URL}/AccesoGeneral"
+MEJORA_URL = f"{BASE_URL}/MejoraBasica"
+
+# Textos visibles de los selectores de filtro
+ACUERDO_TEXTO = "EXT-CE-2022-5 COMPUTADORAS DE ESCRITORIO"
+CATALOGO_TEXTO = "COMPUTADORAS DE ESCRITORIO"
+CATEGORIA_TEXTO = "MONITOR"
+
+# Tiempos de espera (segundos)
+WAIT_NORMAL = 15
+WAIT_LARGO = 30
+WAIT_CORTO = 5
+PAUSA_ENTRE_PRODUCTOS = 2  # Pausa entre iteraciones para no sobrecargar
+
+# Estado para modo GUI
+MODO_GUI = False
+EVENTO_LOGIN = None
+GUI_NOTIFICAR_LOGIN = None
+
+# Control de ejecución (pausa / detenición / aprendizaje)
+PAUSA_EVENTO = None       # threading.Event: set=corriendo, clear=en pausa
+DETENER_EVENTO = None     # threading.Event: set=detener
+ANALIZADOR = None         # instancia de AnalizadorFallos
+
+# ---------------------------------------------------------------------------
+# LOGGING
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(
+            BASE_DIR / "bot.log", encoding="utf-8"
+        ),
+    ],
+)
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# REPORTE EXCEL
+# ---------------------------------------------------------------------------
+REPORTE_PATH = BASE_DIR / f"reporte_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+RESULTADOS: list = []
+
+
+@dataclass
+class ExcelValidationSummary:
+    file_path: Path
+    total_rows: int = 0
+    valid_rows: int = 0
+    empty_rows: int = 0
+    missing_part_rows: int = 0
+    invalid_stock_rows: int = 0
+    duplicate_parts: int = 0
+    missing_columns: tuple[str, ...] = ()
+    warnings: list[str] = field(default_factory=list)
+    blocking_issues: list[str] = field(default_factory=list)
+    issue_examples: list[str] = field(default_factory=list)
+    sample_parts: list[str] = field(default_factory=list)
+
+    @property
+    def total_problem_rows(self) -> int:
+        return self.missing_part_rows + self.invalid_stock_rows
+
+    @property
+    def is_ready(self) -> bool:
+        return not self.blocking_issues and self.valid_rows > 0
+
+    @property
+    def status_label(self) -> str:
+        if self.is_ready:
+            return "Listo para ejecutar"
+        if self.blocking_issues:
+            return "Requiere correcciones"
+        return "Pendiente de revisión"
+
+
+def _normalizar_parte(valor) -> str:
+    if pd.isna(valor):
+        return ""
+    texto = str(valor).strip()
+    return "" if texto.lower() == "nan" else texto
+
+
+def _normalizar_stock(valor) -> int:
+    if pd.isna(valor):
+        raise ValueError("vacío")
+
+    if isinstance(valor, str):
+        texto = valor.strip()
+        if not texto:
+            raise ValueError("vacío")
+        texto = texto.replace(",", ".")
+        if not re.fullmatch(r"-?\d+(?:\.0+)?", texto):
+            raise ValueError("debe ser un número entero")
+        numero = float(texto)
+    else:
+        try:
+            numero = float(valor)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("debe ser un número entero") from exc
+
+    if not numero.is_integer():
+        raise ValueError("debe ser un número entero")
+
+    numero_entero = int(numero)
+    if numero_entero < 0:
+        raise ValueError("no puede ser negativo")
+    return numero_entero
+
+
+def analizar_excel_productos(excel_path: Path) -> tuple[ExcelValidationSummary, pd.DataFrame]:
+    """Lee y valida el Excel antes de ejecutar Selenium."""
+    ruta = Path(excel_path)
+    resumen = ExcelValidationSummary(file_path=ruta)
+
+    if not ruta.exists():
+        resumen.blocking_issues.append("No se encontró el archivo Excel seleccionado.")
+        return resumen, pd.DataFrame(columns=["Parte", "Stock"])
+
+    try:
+        raw_df = pd.read_excel(ruta)
+    except Exception as exc:
+        resumen.blocking_issues.append(f"No se pudo abrir el archivo: {exc}")
+        return resumen, pd.DataFrame(columns=["Parte", "Stock"])
+
+    resumen.total_rows = len(raw_df)
+    columnas_faltantes = tuple(
+        columna for columna in ("Parte", "Stock") if columna not in raw_df.columns
+    )
+    if columnas_faltantes:
+        resumen.missing_columns = columnas_faltantes
+        resumen.blocking_issues.append(
+            "Faltan columnas obligatorias: " + ", ".join(columnas_faltantes)
+        )
+        return resumen, pd.DataFrame(columns=["Parte", "Stock"])
+
+    registros_validos = []
+    for indice, fila in raw_df.iterrows():
+        parte = _normalizar_parte(fila.get("Parte"))
+        stock_raw = fila.get("Stock")
+        fila_excel = int(indice) + 2
+
+        if not parte and (pd.isna(stock_raw) or str(stock_raw).strip() == ""):
+            resumen.empty_rows += 1
+            continue
+
+        if not parte:
+            resumen.missing_part_rows += 1
+            if len(resumen.issue_examples) < 4:
+                resumen.issue_examples.append(f"Fila {fila_excel}: falta el número de parte.")
+            continue
+
+        try:
+            stock = _normalizar_stock(stock_raw)
+        except ValueError as exc:
+            resumen.invalid_stock_rows += 1
+            if len(resumen.issue_examples) < 4:
+                resumen.issue_examples.append(
+                    f"Fila {fila_excel} ({parte}): stock {exc}."
+                )
+            continue
+
+        registros_validos.append({"Parte": parte, "Stock": stock})
+
+    df_limpio = pd.DataFrame(registros_validos, columns=["Parte", "Stock"])
+    resumen.valid_rows = len(df_limpio)
+    resumen.sample_parts = df_limpio["Parte"].head(3).tolist() if not df_limpio.empty else []
+
+    if not df_limpio.empty:
+        duplicados = int(df_limpio["Parte"].duplicated(keep=False).sum())
+        resumen.duplicate_parts = duplicados
+        if duplicados:
+            resumen.warnings.append(
+                f"Hay {duplicados} fila(s) con números de parte repetidos. Se procesarán en el orden del archivo."
+            )
+
+    if resumen.missing_part_rows:
+        resumen.blocking_issues.append(
+            f"Hay {resumen.missing_part_rows} fila(s) sin número de parte."
+        )
+    if resumen.invalid_stock_rows:
+        resumen.blocking_issues.append(
+            f"Hay {resumen.invalid_stock_rows} fila(s) con stock inválido."
+        )
+    if resumen.valid_rows == 0 and not resumen.blocking_issues:
+        resumen.blocking_issues.append("No hay productos válidos para procesar.")
+    if resumen.empty_rows:
+        resumen.warnings.append(
+            f"Se ignorarán {resumen.empty_rows} fila(s) vacías en el Excel."
+        )
+
+    return resumen, df_limpio
+
+
+def cargar_productos_excel(excel_path: Path) -> tuple[pd.DataFrame, ExcelValidationSummary]:
+    """Devuelve el DataFrame listo para procesar o un error legible para el usuario."""
+    resumen, df_limpio = analizar_excel_productos(excel_path)
+    if resumen.blocking_issues:
+        detalle = "\n".join(f"- {item}" for item in resumen.blocking_issues)
+        ejemplos = "\n".join(f"- {item}" for item in resumen.issue_examples)
+        mensaje = ["El archivo Excel necesita correcciones antes de continuar:", detalle]
+        if ejemplos:
+            mensaje.extend(["", "Ejemplos detectados:", ejemplos])
+        raise ValueError("\n".join(mensaje))
+    return df_limpio, resumen
+
+
+def nueva_ruta_reporte():
+    return BASE_DIR / f"reporte_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+
+
+def clasificar_error(mensaje: str) -> str:
+    """Convierte un error técnico en una categoría comprensible para el usuario."""
+    msg = str(mensaje).lower()
+    if "no se encontraron resultados" in msg:
+        return "Producto no encontrado en la tabla"
+    if "n_stock" in msg or "campo de stock" in msg:
+        return "Modal de stock no se abrió"
+    if "timeout" in msg or "timed out" in msg:
+        return "Tiempo de espera agotado"
+    if "no such element" in msg:
+        return "Elemento de página no encontrado"
+    if "stale" in msg:
+        return "Página cambió durante la operación"
+    return "Error inesperado"
+
+
+def registrar_resultado(parte: str, stock, estado: str, detalle: str = "", duracion: float = 0.0):
+    """Registra el resultado de un producto en la lista interna."""
+    RESULTADOS.append({
+        "Parte": parte,
+        "Stock": stock,
+        "Estado": estado,
+        "Tipo de Fallo": clasificar_error(detalle) if estado == "FALLO" else "",
+        "Descripción": detalle,
+        "Duración (seg)": round(duracion, 1),
+    })
+    simbolo = "OK" if estado == "EXITO" else "FALLO"
+    log.info(f"  [{simbolo}] {parte} -> {detalle}")
+
+
+def generar_plantilla_excel(destino: Path):
+    """
+    Crea un archivo Excel plantilla con instrucciones claras para que el usuario
+    sepa cómo llenarlo correctamente antes de subirlo al bot.
+    """
+    wb = _OxlWorkbook()
+
+    # ── helpers de estilo ────────────────────────────────────────────────
+    def fill(color):
+        return _OxlFill("solid", fgColor=color)
+
+    def font(bold=False, size=10, color="000000", italic=False):
+        return _OxlFont(name="Calibri", bold=bold, size=size, color=color, italic=italic)
+
+    borde = _OxlBorder(
+        left=_OxlSide(style="thin", color="BFBFBF"),
+        right=_OxlSide(style="thin", color="BFBFBF"),
+        top=_OxlSide(style="thin", color="BFBFBF"),
+        bottom=_OxlSide(style="thin", color="BFBFBF"),
+    )
+    ac = _OxlAlignment(horizontal="center", vertical="center", wrap_text=False)
+    al = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
+
+    def c(ws, row, col, value, fll=None, fnt=None, aln=None):
+        cell = ws.cell(row=row, column=col, value=value)
+        if fll:
+            cell.fill = fll
+        if fnt:
+            cell.font = fnt
+        cell.border = borde
+        cell.alignment = aln or al
+        return cell
+
+    # ── Hoja 1: Datos ────────────────────────────────────────────────────
+    ws = wb.active
+    ws.title = "Productos"
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 14
+
+    # Título
+    ws.merge_cells("A1:B1")
+    cell = ws["A1"]
+    cell.value = "Plantilla de Productos — Peru Compras Bot"
+    cell.font = font(bold=True, size=13, color="FFFFFF")
+    cell.fill = fill("00205B")
+    cell.alignment = ac
+    ws.row_dimensions[1].height = 24
+
+    # Subtítulo / instrucción rápida
+    ws.merge_cells("A2:B2")
+    cell = ws["A2"]
+    cell.value = "Completa las columnas 'Parte' y 'Stock' a partir de la fila 4. No borres los encabezados."
+    cell.font = font(italic=True, size=9, color="595959")
+    cell.alignment = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
+    ws.row_dimensions[2].height = 14
+    ws.row_dimensions[3].height = 6
+
+    # Encabezados
+    for col, (txt, color_fll) in enumerate(
+        [("Parte", "1F4E79"), ("Stock", "1F4E79")], start=1
+    ):
+        c(ws, 4, col, txt, fill(color_fll), font(bold=True, size=11, color="FFFFFF"), aln=ac)
+    ws.row_dimensions[4].height = 20
+
+    # Filas de ejemplo (se pueden borrar)
+    ejemplos = [
+        ("ABC-12345", 10),
+        ("XYZ-67890", 0),
+        ("MON-00001", 5),
+    ]
+    for i, (parte, stock) in enumerate(ejemplos, start=5):
+        fll = fill("EBF3FB") if i % 2 == 0 else fill("FFFFFF")
+        c(ws, i, 1, parte, fll, font(size=10, color="595959"))
+        c(ws, i, 2, stock, fll, font(size=10, color="595959"), aln=ac)
+        ws.row_dimensions[i].height = 16
+
+    # ── Hoja 2: Instrucciones ────────────────────────────────────────────
+    ws2 = wb.create_sheet("Instrucciones")
+    ws2.sheet_view.showGridLines = False
+    ws2.column_dimensions["A"].width = 6
+    ws2.column_dimensions["B"].width = 60
+
+    instrucciones = [
+        ("INSTRUCCIONES PARA COMPLETAR EL ARCHIVO", "titulo"),
+        ("", "sep"),
+        ("1. Columna 'Parte'", "subtitulo"),
+        ("   Escribe el número de parte exacto del producto tal como aparece en el portal.", "texto"),
+        ("   Ejemplo: ABC-12345", "ejemplo"),
+        ("", "sep"),
+        ("2. Columna 'Stock'", "subtitulo"),
+        ("   Escribe la cantidad de stock disponible. Solo números enteros (0, 1, 5, 100…).", "texto"),
+        ("   Usa 0 para indicar sin stock. No uses comas ni puntos decimales.", "texto"),
+        ("   Ejemplo: 10", "ejemplo"),
+        ("", "sep"),
+        ("3. Reglas importantes", "subtitulo"),
+        ("   ✔  No borres ni renombres los encabezados 'Parte' y 'Stock'.", "texto"),
+        ("   ✔  No dejes filas completamente vacías entre productos.", "texto"),
+        ("   ✔  No uses hojas adicionales para los datos (usa siempre 'Productos').", "texto"),
+        ("   ✔  Guarda el archivo en formato .xlsx antes de cargarlo en el bot.", "texto"),
+        ("   ✗  No incluyas símbolos, espacios extra ni texto en la columna Stock.", "advertencia"),
+        ("   ✗  No fusiones celdas ni apliques filtros en la hoja de datos.", "advertencia"),
+        ("", "sep"),
+        ("4. Cómo usar el archivo en el bot", "subtitulo"),
+        ("   a) Guarda este archivo con el nombre que prefieras (ej: mis_productos.xlsx).", "texto"),
+        ("   b) En la aplicación, haz clic en 'Seleccionar Excel' y elige este archivo.", "texto"),
+        ("   c) Configura los filtros y haz clic en 'Iniciar automatización'.", "texto"),
+        ("", "sep"),
+        ("5. ¿Qué pasa si hay un error?", "subtitulo"),
+        ("   El bot intentará procesar todos los productos.", "texto"),
+        ("   Los que fallen quedan anotados en el reporte Excel con el motivo del error.", "texto"),
+        ("   Puedes corregir esos productos y volver a ejecutar sólo con ellos.", "texto"),
+    ]
+
+    estilos = {
+        "titulo":     (fill("00205B"), font(bold=True,  size=13, color="FFFFFF")),
+        "sep":        (None,          None),
+        "subtitulo":  (fill("D9E1F2"), font(bold=True,  size=10, color="1F4E79")),
+        "texto":      (fill("FFFFFF"), font(size=10,    color="333333")),
+        "ejemplo":    (fill("EBF3FB"), font(italic=True, size=10, color="2E75B6")),
+        "advertencia":(fill("FFF2CC"), font(size=10,    color="9C6500")),
+    }
+
+    for i, (texto, estilo) in enumerate(instrucciones, start=1):
+        fll, fnt = estilos.get(estilo, (None, None))
+        ws2.merge_cells(f"A{i}:B{i}")
+        cell = ws2[f"A{i}"]
+        cell.value = texto
+        if fll:
+            cell.fill = fll
+            cell.border = borde
+        if fnt:
+            cell.font = fnt
+        cell.alignment = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
+        ws2.row_dimensions[i].height = 18 if texto else 8
+
+    wb.save(destino)
+
+
+def generar_reporte_excel(acuerdo_texto: str = "", catalogo_texto: str = "", categoria_texto: str = ""):
+    """Genera un reporte Excel profesional con resumen, detalle por producto y gráficos."""
+    from collections import Counter
+    from openpyxl.chart import PieChart, BarChart, Reference
+    from openpyxl.utils import get_column_letter
+    Workbook = _OxlWorkbook
+    PatternFill = _OxlFill
+    Font = _OxlFont
+    Alignment = _OxlAlignment
+    Border = _OxlBorder
+    Side = _OxlSide
+
+    wb = Workbook()
+    total = len(RESULTADOS)
+    exitos = sum(1 for r in RESULTADOS if r["Estado"] == "EXITO")
+    fallos = total - exitos
+
+    # ── Helpers de estilo ────────────────────────────────────────────────
+    def fill(color):
+        return PatternFill("solid", fgColor=color)
+
+    def font(bold=False, size=10, color="000000", italic=False):
+        return Font(name="Calibri", bold=bold, size=size, color=color, italic=italic)
+
+    borde = Border(
+        left=Side(style="thin", color="BFBFBF"),
+        right=Side(style="thin", color="BFBFBF"),
+        top=Side(style="thin", color="BFBFBF"),
+        bottom=Side(style="thin", color="BFBFBF"),
+    )
+    ac = Alignment(horizontal="center", vertical="center", wrap_text=False)
+    al = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+    def celda(ws, row, col, value, fll=None, fnt=None, aln=None):  # noqa: E306
+        c = ws.cell(row=row, column=col, value=value)
+        if fll:
+            c.fill = fll
+        if fnt:
+            c.font = fnt
+        c.border = borde
+        c.alignment = aln or ac
+        return c
+
+    # =====================================================================
+    # HOJA 1: RESUMEN
+    # =====================================================================
+    ws_res = wb.active
+    ws_res.title = "Resumen"
+    ws_res.sheet_view.showGridLines = False
+    ws_res.column_dimensions["A"].width = 30
+    ws_res.column_dimensions["B"].width = 14
+    ws_res.column_dimensions["C"].width = 14
+
+    # Título
+    ws_res.merge_cells("A1:C1")
+    c = ws_res["A1"]
+    c.value = "PERU COMPRAS BOT — Reporte de Actualización de Stock"
+    c.font = font(bold=True, size=14, color="FFFFFF")
+    c.fill = fill("00205B")
+    c.alignment = ac
+    ws_res.row_dimensions[1].height = 26
+
+    # Fecha
+    ws_res.merge_cells("A2:C2")
+    c = ws_res["A2"]
+    c.value = f"Generado el {datetime.now():%d/%m/%Y a las %H:%M:%S}"
+    c.font = font(italic=True, size=9, color="595959")
+    c.alignment = ac
+    ws_res.row_dimensions[2].height = 14
+
+    # Configuración
+    ws_res.merge_cells("A3:C3")
+    c = ws_res["A3"]
+    c.value = f"Acuerdo: {acuerdo_texto}  |  Catálogo: {catalogo_texto}  |  Categoría: {categoria_texto}"
+    c.font = font(italic=True, size=9, color="595959")
+    c.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    ws_res.row_dimensions[3].height = 14
+    ws_res.row_dimensions[4].height = 8
+
+    # Encabezado de tabla resumen
+    for col, txt in enumerate(["Resultado", "Cantidad", "Porcentaje"], start=1):
+        celda(ws_res, 5, col, txt, fill("1F4E79"), font(bold=True, size=11, color="FFFFFF"))
+    ws_res.row_dimensions[5].height = 20
+
+    pct_e = f"{exitos / total * 100:.1f}%" if total > 0 else "0.0%"
+    pct_f = f"{fallos / total * 100:.1f}%" if total > 0 else "0.0%"
+
+    for col, val in enumerate(["Exitosos ✔", exitos, pct_e], start=1):
+        celda(ws_res, 6, col, val, fill("C6EFCE"), font(bold=True, size=10, color="375623"))
+    ws_res.row_dimensions[6].height = 18
+
+    for col, val in enumerate(["Fallidos ✘", fallos, pct_f], start=1):
+        celda(ws_res, 7, col, val, fill("FFC7CE"), font(bold=True, size=10, color="9C0006"))
+    ws_res.row_dimensions[7].height = 18
+
+    for col, val in enumerate(["Total", total, "100%"], start=1):
+        celda(ws_res, 8, col, val, fill("D9E1F2"), font(bold=True, size=10))
+    ws_res.row_dimensions[8].height = 18
+
+    # Gráfico de torta: Éxitos vs Fallos
+    if total > 0:
+        pie = PieChart()
+        pie.title = "Resultados de Actualización"
+        pie.style = 10
+        pie.width = 13
+        pie.height = 9
+        data_ref = Reference(ws_res, min_col=2, min_row=5, max_row=7)
+        cats_ref = Reference(ws_res, min_col=1, min_row=6, max_row=7)
+        pie.add_data(data_ref, titles_from_data=True)
+        pie.set_categories(cats_ref)
+        ws_res.add_chart(pie, "E1")
+
+    # Desglose de tipos de fallo
+    tipos = Counter(r["Tipo de Fallo"] for r in RESULTADOS if r["Estado"] == "FALLO")
+    if tipos:
+        ws_res.row_dimensions[10].height = 8
+        for col, txt in enumerate(["Tipo de Fallo", "Cantidad"], start=1):
+            celda(ws_res, 11, col, txt, fill("1F4E79"), font(bold=True, size=11, color="FFFFFF"))
+        ws_res.row_dimensions[11].height = 20
+        for i, (tipo, cnt) in enumerate(tipos.most_common(), start=12):
+            celda(ws_res, i, 1, tipo, fill("FFC7CE"), font(size=10, color="9C0006"), aln=al)
+            celda(ws_res, i, 2, cnt,  fill("FFC7CE"), font(bold=True, size=10, color="9C0006"))
+            ws_res.row_dimensions[i].height = 16
+
+        last_tipo_row = 11 + len(tipos)
+        bar_tipos = BarChart()
+        bar_tipos.type = "col"
+        bar_tipos.title = "Detalle de Fallos por Categoría"
+        bar_tipos.style = 10
+        bar_tipos.y_axis.title = "Productos"
+        bar_tipos.width = 13
+        bar_tipos.height = 9
+        data_b = Reference(ws_res, min_col=2, min_row=11, max_row=last_tipo_row)
+        cats_b = Reference(ws_res, min_col=1, min_row=12, max_row=last_tipo_row)
+        bar_tipos.add_data(data_b, titles_from_data=True)
+        bar_tipos.set_categories(cats_b)
+        ws_res.add_chart(bar_tipos, "E18")
+
+    # =====================================================================
+    # HOJA 2: DETALLE POR PRODUCTO
+    # =====================================================================
+    ws_det = wb.create_sheet("Detalle por Producto")
+    ws_det.sheet_view.showGridLines = False
+
+    ws_det.merge_cells("A1:G1")
+    c = ws_det["A1"]
+    c.value = "Detalle de Todos los Productos"
+    c.font = font(bold=True, size=13, color="FFFFFF")
+    c.fill = fill("1F4E79")
+    c.alignment = ac
+    ws_det.row_dimensions[1].height = 24
+
+    det_headers = ["#", "Parte", "Stock", "Estado", "Tipo de Fallo", "Descripción del Error", "Duración (seg)"]
+    for col, h in enumerate(det_headers, start=1):
+        celda(ws_det, 2, col, h, fill("2E75B6"), font(bold=True, size=10, color="FFFFFF"))
+    ws_det.row_dimensions[2].height = 18
+
+    for i, r in enumerate(RESULTADOS, start=1):
+        is_ok = r["Estado"] == "EXITO"
+        fll = fill("C6EFCE") if is_ok else fill("FFC7CE")
+        fnt_row = font(bold=True, size=9, color="375623" if is_ok else "9C0006")
+        row = i + 2
+        vals = [i, r["Parte"], r["Stock"], r["Estado"],
+                r["Tipo de Fallo"] or "—", r["Descripción"], r["Duración (seg)"]]
+        for col, val in enumerate(vals, start=1):
+            celda(ws_det, row, col, val, fll, fnt_row, aln=al if col in (2, 5, 6) else ac)
+        ws_det.row_dimensions[row].height = 16
+
+    for col_letter, width in {"A": 5, "B": 22, "C": 8, "D": 10, "E": 30, "F": 42, "G": 14}.items():
+        ws_det.column_dimensions[col_letter].width = width
+
+    # Gráfico de barras: duración por producto
+    if RESULTADOS:
+        last_det = 2 + len(RESULTADOS)
+        bar_dur = BarChart()
+        bar_dur.type = "col"
+        bar_dur.title = "Tiempo de Procesamiento por Producto (segundos)"
+        bar_dur.style = 10
+        bar_dur.y_axis.title = "Segundos"
+        bar_dur.width = min(len(RESULTADOS) * 1.5 + 4, 28)
+        bar_dur.height = 12
+        data_dur = Reference(ws_det, min_col=7, min_row=2, max_row=last_det)
+        cats_dur = Reference(ws_det, min_col=2, min_row=3, max_row=last_det)
+        bar_dur.add_data(data_dur, titles_from_data=True)
+        bar_dur.set_categories(cats_dur)
+        ws_det.add_chart(bar_dur, f"A{last_det + 3}")
+
+    # =====================================================================
+    # HOJA 3: SOLO FALLIDOS
+    # =====================================================================
+    fallidos = [r for r in RESULTADOS if r["Estado"] == "FALLO"]
+    ws_fail = wb.create_sheet("Solo Fallidos")
+    ws_fail.sheet_view.showGridLines = False
+
+    ws_fail.merge_cells("A1:F1")
+    c = ws_fail["A1"]
+    c.value = f"Productos Fallidos — {len(fallidos)} de {total}"
+    c.font = font(bold=True, size=13, color="FFFFFF")
+    c.fill = fill("9C0006")
+    c.alignment = ac
+    ws_fail.row_dimensions[1].height = 24
+
+    if fallidos:
+        fail_headers = ["#", "Parte", "Stock Intentado", "Tipo de Fallo", "Descripción del Error", "Duración (seg)"]
+        for col, h in enumerate(fail_headers, start=1):
+            celda(ws_fail, 2, col, h, fill("2E75B6"), font(bold=True, size=10, color="FFFFFF"))
+        ws_fail.row_dimensions[2].height = 18
+
+        for i, r in enumerate(fallidos, start=1):
+            row = i + 2
+            fll_alt = fill("FFE4E4") if i % 2 == 0 else fill("FFC7CE")
+            vals = [i, r["Parte"], r["Stock"], r["Tipo de Fallo"], r["Descripción"], r["Duración (seg)"]]
+            for col, val in enumerate(vals, start=1):
+                celda(ws_fail, row, col, val, fll_alt, font(size=10, color="9C0006"),
+                      aln=al if col in (2, 4, 5) else ac)
+            ws_fail.row_dimensions[row].height = 18
+
+        for col_letter, width in {"A": 5, "B": 22, "C": 14, "D": 32, "E": 48, "F": 14}.items():
+            ws_fail.column_dimensions[col_letter].width = width
+    else:
+        ws_fail.merge_cells("A2:F2")
+        c = ws_fail["A2"]
+        c.value = "¡Sin fallos! Todos los productos se actualizaron correctamente."
+        c.font = font(bold=True, size=11, color="375623")
+        c.fill = fill("C6EFCE")
+        c.alignment = ac
+        ws_fail.row_dimensions[2].height = 22
+
+    wb.save(REPORTE_PATH)
+    log.info(f"Reporte Excel generado: {REPORTE_PATH}")
+    return REPORTE_PATH
+
+
+# ---------------------------------------------------------------------------
+# HELPERS DE SELENIUM
+# ---------------------------------------------------------------------------
+def esperar_elemento(driver, by, valor, timeout=WAIT_NORMAL):
+    """Espera a que un elemento sea visible y lo devuelve."""
+    return WebDriverWait(driver, timeout).until(
+        EC.visibility_of_element_located((by, valor))
+    )
+
+
+def esperar_clickeable(driver, by, valor, timeout=WAIT_NORMAL):
+    """Espera a que un elemento sea clickeable y lo devuelve."""
+    return WebDriverWait(driver, timeout).until(
+        EC.element_to_be_clickable((by, valor))
+    )
+
+
+def esperar_opciones_select(driver, select_id, timeout=WAIT_NORMAL):
+    """Espera a que un <select> tenga mas de 1 opcion (la primera suele ser placeholder)."""
+    def tiene_opciones(drv):
+        sel = drv.find_element(By.ID, select_id)
+        opciones = sel.find_elements(By.TAG_NAME, "option")
+        return len(opciones) > 1
+
+    WebDriverWait(driver, timeout).until(tiene_opciones)
+    return Select(driver.find_element(By.ID, select_id))
+
+
+def seleccionar_por_texto_parcial(select_obj: Select, texto_parcial: str):
+    """Selecciona una opcion cuyo texto visible contenga el texto parcial dado."""
+    for opcion in select_obj.options:
+        if texto_parcial.upper() in opcion.text.upper():
+            select_obj.select_by_visible_text(opcion.text)
+            log.info(f"    Seleccionado: {opcion.text}")
+            return True
+    raise NoSuchElementException(
+        f"No se encontro opcion que contenga '{texto_parcial}'"
+    )
+
+
+def aceptar_alerta(driver, timeout=WAIT_NORMAL):
+    """Espera y acepta un alert/confirm del navegador."""
+    try:
+        WebDriverWait(driver, timeout).until(EC.alert_is_present())
+        alerta = driver.switch_to.alert
+        texto = alerta.text
+        alerta.accept()
+        log.info(f"    Alerta aceptada: {texto}")
+        return texto
+    except TimeoutException:
+        log.warning("    No aparecio alerta en el tiempo esperado.")
+        return None
+
+
+def manejar_confirmacion_sweetalert(driver, timeout=WAIT_NORMAL):
+    """
+    Maneja dialogos tipo SweetAlert (muy comunes en este portal).
+    Busca el boton de confirmacion "Si" / "Aceptar" / "Cerrar".
+    """
+    selectores_boton = [
+        "//button[contains(@class,'swal2-confirm')]",
+        "//button[contains(@class,'confirm')]",
+        "//button[contains(text(),'Si')]",
+        "//button[contains(text(),'Sí')]",
+        "//button[contains(text(),'OK')]",
+        "//button[contains(text(),'Aceptar')]",
+        "//button[contains(text(),'Cerrar')]",
+    ]
+    for xpath in selectores_boton:
+        try:
+            btn = WebDriverWait(driver, timeout).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
+            btn.click()
+            log.info(f"    SweetAlert confirmado con: {xpath}")
+            return True
+        except TimeoutException:
+            continue
+    return False
+
+
+def leer_opciones_select(driver, select_id, timeout=WAIT_NORMAL):
+    """Lee las opciones de un <select> excluyendo el placeholder (value=0 o vacío)."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.ID, select_id))
+        )
+        el = driver.find_element(By.ID, select_id)
+        return [
+            opt.text.strip()
+            for opt in el.find_elements(By.TAG_NAME, "option")
+            if opt.get_attribute("value") not in ("", "0") and opt.text.strip()
+        ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# PASO 1: LOGIN Y VERIFICACION
+# ---------------------------------------------------------------------------
+def paso1_login(driver):
+    """Carga la pagina de login y espera la verificacion de 2 pasos."""
+    log.info("=" * 60)
+    log.info("PASO 1: Login y verificacion")
+    log.info("=" * 60)
+
+    driver.get(LOGIN_URL)
+    log.info(f"Pagina cargada: {LOGIN_URL}")
+
+    # --- Esperar a que el usuario llene credenciales manualmente ---
+    if MODO_GUI and EVENTO_LOGIN is not None:
+        log.info("Esperando confirmación de login desde la interfaz...")
+        if GUI_NOTIFICAR_LOGIN:
+            GUI_NOTIFICAR_LOGIN()
+        EVENTO_LOGIN.clear()
+        EVENTO_LOGIN.wait()
+    else:
+        print("\n" + "=" * 60)
+        print("ACCION MANUAL REQUERIDA")
+        print("=" * 60)
+        print("1. Ingresa tu RUC, usuario y contrasena en el navegador.")
+        print("2. Haz clic en 'Ingresar'.")
+        print("3. Si aparece la ventana de verificacion de codigo, solo presiona ENTER.")
+        input(">>> Presiona ENTER aqui cuando hayas completado el login... ")
+
+    # --- Saltar verificacion haciendo click atras ---
+    log.info("Saltando verificacion de codigo con navegacion hacia atras...")
+    driver.back()
+    time.sleep(3)
+    log.info(f"Navegacion hacia atras completada. URL actual: {driver.current_url}")
+
+    # Esperar a que cargue el dashboard
+    time.sleep(2)
+    log.info(f"Login completado. URL actual: {driver.current_url}")
+
+
+# ---------------------------------------------------------------------------
+# PASO 2: NAVEGACION Y TRUCO DE RETROCESO
+# ---------------------------------------------------------------------------
+def paso2_navegacion(driver):
+    """Navega a la seccion de Mejora Basica desbloqueando el menu."""
+    log.info("=" * 60)
+    log.info("PASO 2: Navegacion a Mejora de Precio y Existencias")
+    log.info("=" * 60)
+
+    # Truco de retroceso: volver atras para desbloquear el menu
+    driver.back()
+    time.sleep(2)
+    driver.get(BASE_URL)
+    time.sleep(2)
+    log.info("Retroceso ejecutado para desbloquear menu.")
+
+    # Intentar navegar por URL directa
+    driver.get(MEJORA_URL)
+    time.sleep(3)
+
+    # Verificar que estamos en la pagina correcta
+    if "MejoraBasica" in driver.current_url:
+        log.info(f"Navegacion exitosa a: {driver.current_url}")
+        return
+
+    # Fallback: intentar por menu lateral
+    log.info("Intentando navegacion por menu lateral...")
+    try:
+        menu_mejora = esperar_clickeable(
+            driver,
+            By.XPATH,
+            "//a[contains(text(),'Mejora de ofertas')]"
+            "|//span[contains(text(),'Mejora de ofertas')]"
+            "|//li[contains(text(),'Mejora de ofertas')]",
+        )
+        menu_mejora.click()
+        time.sleep(1)
+
+        submenu = esperar_clickeable(
+            driver,
+            By.XPATH,
+            "//a[contains(@href,'MejoraBasica')]"
+            "|//a[contains(text(),'Precio y Existencias')]"
+            "|//a[contains(text(),'Precio y existencias')]",
+        )
+        submenu.click()
+        time.sleep(2)
+        log.info(f"Navegacion por menu completada. URL: {driver.current_url}")
+    except TimeoutException:
+        log.warning(
+            "No se pudo navegar por menu. Intentando URL directa nuevamente..."
+        )
+        driver.get(MEJORA_URL)
+        time.sleep(3)
+
+
+# ---------------------------------------------------------------------------
+# PASO 3: CONFIGURACION DE FILTROS
+# ---------------------------------------------------------------------------
+def paso3_filtros(driver):
+    """Selecciona Acuerdo Marco, Catalogo y Categoria."""
+    log.info("=" * 60)
+    log.info("PASO 3: Configuracion de filtros")
+    log.info("=" * 60)
+
+    # Acuerdo Marco
+    log.info("  Seleccionando Acuerdo Marco...")
+    select_acuerdo = esperar_opciones_select(driver, "ajaxAcuerdo", WAIT_LARGO)
+    seleccionar_por_texto_parcial(select_acuerdo, ACUERDO_TEXTO)
+    time.sleep(2)  # Esperar carga del siguiente select
+
+    # Catalogo Electronico
+    log.info("  Seleccionando Catalogo Electronico...")
+    select_catalogo = esperar_opciones_select(driver, "ajaxCatalogo", WAIT_LARGO)
+    seleccionar_por_texto_parcial(select_catalogo, CATALOGO_TEXTO)
+    time.sleep(2)
+
+    # Categoria
+    log.info("  Seleccionando Categoria...")
+    select_categoria = esperar_opciones_select(driver, "ajaxCategoria", WAIT_LARGO)
+    seleccionar_por_texto_parcial(select_categoria, CATEGORIA_TEXTO)
+    time.sleep(1)
+
+    log.info("Filtros configurados correctamente.")
+
+
+# ---------------------------------------------------------------------------
+# PASO 4: BUCLE DE ACTUALIZACION DE STOCK
+# ---------------------------------------------------------------------------
+def paso4_actualizar_stock(driver, df: pd.DataFrame):
+    """Itera sobre cada producto del DataFrame y actualiza el stock."""
+    log.info("=" * 60)
+    log.info(f"PASO 4: Actualizacion de stock ({len(df)} productos)")
+    log.info("=" * 60)
+
+    total = len(df)
+    exitos = 0
+    fallos = 0
+
+    for idx, fila in df.iterrows():
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            log.warning("Detención solicitada. Se cierra el procesamiento antes del siguiente producto.")
+            break
+
+        _esperar_controles_ejecucion()
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            break
+
+        parte = str(fila["Parte"]).strip()
+        stock = str(int(fila["Stock"]))
+        log.info(f"\n--- Producto {int(idx) + 1}/{total}: Parte={parte}, Stock={stock} ---")
+
+        t_inicio = time.time()
+        try:
+            actualizar_producto(driver, parte, stock)
+            registrar_resultado(parte, stock, "EXITO", "Stock actualizado correctamente",
+                                duracion=time.time() - t_inicio)
+            exitos += 1
+        except Exception as e:
+            log.error(f"  Error procesando {parte}: {e}")
+            tipo_fallo = clasificar_error(str(e))
+            if ANALIZADOR:
+                ANALIZADOR.registrar(tipo_fallo)
+            registrar_resultado(parte, stock, "FALLO", str(e),
+                                duracion=time.time() - t_inicio)
+            fallos += 1
+            # Intentar recuperar el estado limpio para el siguiente producto
+            try:
+                recuperar_estado(driver)
+            except Exception:
+                log.warning("  No se pudo recuperar estado. Recargando pagina...")
+                driver.get(MEJORA_URL)
+                time.sleep(3)
+                paso3_filtros(driver)
+
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            break
+
+        _sleep_controlado(PAUSA_ENTRE_PRODUCTOS)
+
+    log.info("=" * 60)
+    log.info(f"RESULTADO FINAL: {exitos} exitosos, {fallos} fallidos de {total} total")
+    log.info(f"Reporte guardado en: {REPORTE_PATH}")
+    log.info("=" * 60)
+
+
+def _esperar_controles_ejecucion():
+    while PAUSA_EVENTO is not None and not PAUSA_EVENTO.is_set():
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            return
+        time.sleep(0.2)
+
+
+def _sleep_controlado(segundos: int | float):
+    if segundos <= 0:
+        return
+    fin = time.time() + segundos
+    while time.time() < fin:
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            return
+        _esperar_controles_ejecucion()
+        time.sleep(0.2)
+
+
+def _buscar_filas_resultado(driver, timeout=WAIT_NORMAL):
+    return WebDriverWait(driver, timeout).until(
+        EC.presence_of_all_elements_located((
+            By.XPATH,
+            "//table//tbody//tr[contains(@class,'row')]"
+            "|//table//tbody//tr[td]"
+            "|//div[contains(@class,'dataTables')]//tbody//tr[td]",
+        ))
+    )
+
+
+def _obtener_boton_existencias(driver):
+    filas = _buscar_filas_resultado(driver)
+    for fila in filas:
+        try:
+            boton = fila.find_element(By.XPATH, ".//a[contains(@onclick,'fnModificarStock')]")
+            return boton
+        except NoSuchElementException:
+            continue
+    raise TimeoutException("No se encontró el botón de existencias para el producto buscado")
+
+
+def _abrir_modal_stock(driver, boton_existencias):
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", boton_existencias)
+    _sleep_controlado(0.5)
+
+    onclick_value = boton_existencias.get_attribute("onclick") or ""
+    match = re.search(r"fnModificarStock\((\d+)\)", onclick_value)
+
+    if match:
+        product_id = match.group(1)
+        try:
+            driver.execute_script(f"fnModificarStock({product_id});")
+            log.info(f"  Modal de stock solicitado por JS para ID {product_id}")
+            return
+        except Exception as exc:
+            log.warning(f"  No se pudo abrir el modal por JS directo: {exc}")
+
+    boton_existencias.click()
+    log.info("  Modal de stock solicitado por clic normal")
+
+
+def _esperar_formulario_stock(driver, timeout=WAIT_LARGO):
+    selectores = [
+        (By.ID, "formStock"),
+        (By.XPATH, "//form[contains(@action,'ModificarStock') and .//input[@name='N_Stock']]") ,
+        (By.XPATH, "//form[.//input[@id='N_Stock'] or .//input[@name='N_Stock']]") ,
+    ]
+    ultimo_error = None
+    for by, selector in selectores:
+        try:
+            return WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located((by, selector))
+            )
+        except TimeoutException as exc:
+            ultimo_error = exc
+    raise TimeoutException("No se abrió el modal de stock correctamente") from ultimo_error
+
+
+def _obtener_campo_stock(driver, formulario):
+    candidatos = [
+        (By.ID, "N_Stock"),
+        (By.NAME, "N_Stock"),
+        (By.CSS_SELECTOR, "#formStock #N_Stock"),
+        (By.CSS_SELECTOR, "input[id='N_Stock']"),
+    ]
+    for by, selector in candidatos:
+        try:
+            return formulario.find_element(by, selector)
+        except Exception:
+            try:
+                return driver.find_element(by, selector)
+            except Exception:
+                continue
+    raise TimeoutException("No se encontró el campo de stock en el modal")
+
+
+def _guardar_stock(driver, campo_stock):
+    selectores_guardar = [
+        (By.ID, "btn_guardar"),
+        (By.XPATH, "//button[@type='submit']"),
+        (By.XPATH, "//button[contains(normalize-space(),'Guardar')]"),
+    ]
+    for selector_type, selector in selectores_guardar:
+        try:
+            btn_guardar = WebDriverWait(driver, WAIT_CORTO).until(
+                EC.element_to_be_clickable((selector_type, selector))
+            )
+            btn_guardar.click()
+            log.info("  Cambio enviado desde el modal")
+            return
+        except TimeoutException:
+            continue
+
+    campo_stock.send_keys("\n")
+    log.warning("  No se encontró botón guardar. Se intentó confirmar con Enter.")
+
+
+def _confirmar_actualizacion(driver):
+    try:
+        alerta = WebDriverWait(driver, WAIT_CORTO).until(EC.alert_is_present())
+        alerta.accept()
+        log.info("  Confirmación aceptada por alerta nativa")
+        return
+    except TimeoutException:
+        pass
+
+    selectores_si = [
+        (By.XPATH, "//div[contains(@class,'_wModal_btn_ok')]") ,
+        (By.XPATH, "//div[contains(@class,'_wModal_btn') and contains(text(),'Sí')]") ,
+        (By.XPATH, "//button[contains(@class,'_wModal_btn_ok')]") ,
+        (By.XPATH, "//button[contains(normalize-space(),'Sí')]") ,
+        (By.XPATH, "//button[contains(normalize-space(),'Si')]") ,
+    ]
+    for selector_type, selector in selectores_si:
+        try:
+            btn_si = WebDriverWait(driver, WAIT_CORTO).until(
+                EC.element_to_be_clickable((selector_type, selector))
+            )
+            btn_si.click()
+            log.info("  Confirmación aceptada en modal personalizado")
+            return
+        except TimeoutException:
+            continue
+
+    manejar_confirmacion_sweetalert(driver, timeout=WAIT_CORTO)
+
+
+def _cerrar_modal_stock(driver):
+    selectores_cierre = [
+        (By.XPATH, "//button[contains(@class,'close')]") ,
+        (By.XPATH, "//button[@data-dismiss='modal']") ,
+        (By.XPATH, "//div[contains(@class,'_wModal_close')]") ,
+    ]
+    for selector_type, selector in selectores_cierre:
+        try:
+            btn_cerrar = WebDriverWait(driver, WAIT_CORTO).until(
+                EC.element_to_be_clickable((selector_type, selector))
+            )
+            btn_cerrar.click()
+            log.info("  Modal cerrado")
+            return
+        except TimeoutException:
+            continue
+
+
+def actualizar_producto(driver, parte: str, stock: str):
+    """Busca un producto por numero de parte y actualiza su stock."""
+    extra_espera = ANALIZADOR.wait_extra() if ANALIZADOR else 0.0
+
+    if ANALIZADOR and ANALIZADOR.forzar_recarga():
+        log.info("  Ajuste activo: recargando filtros antes de buscar")
+        driver.get(MEJORA_URL)
+        _sleep_controlado(2)
+        paso3_filtros(driver)
+
+    _esperar_controles_ejecucion()
+
+    # 1. Escribir numero de parte en el campo de busqueda
+    campo_busqueda = esperar_elemento(driver, By.ID, "C_Descripcion")
+    campo_busqueda.clear()
+    campo_busqueda.send_keys(parte)
+
+    # 2. Click en buscar
+    btn_buscar = esperar_clickeable(driver, By.ID, "btnBuscar")
+    btn_buscar.click()
+    log.info(f"  Busqueda lanzada para: {parte}")
+
+    # 3. Esperar a que cargue la tabla de resultados
+    _sleep_controlado(3 + extra_espera)
+
+    try:
+        _buscar_filas_resultado(driver, timeout=WAIT_NORMAL + extra_espera)
+    except TimeoutException:
+        raise TimeoutException(f"No se encontraron resultados para '{parte}'")
+
+    btn_existencias = _obtener_boton_existencias(driver)
+    _abrir_modal_stock(driver, btn_existencias)
+
+    log.info("  Esperando que aparezca el modal de stock...")
+    _sleep_controlado(2 + extra_espera)
+
+    formulario = _esperar_formulario_stock(driver, timeout=WAIT_CORTO + extra_espera)
+    campo_stock = _obtener_campo_stock(driver, formulario)
+
+    # 7. Limpiar el campo y escribir el nuevo stock
+    log.info(f"  Limpiando campo y escribiendo stock: {stock}")
+    campo_stock.clear()
+    _sleep_controlado(0.4)
+    campo_stock.send_keys(stock)
+    log.info(f"  Stock ingresado: {stock}")
+
+    _sleep_controlado(0.6)
+    _guardar_stock(driver, campo_stock)
+    _sleep_controlado(1.5)
+    _confirmar_actualizacion(driver)
+    _sleep_controlado(1.5)
+    _cerrar_modal_stock(driver)
+    _sleep_controlado(1)
+    log.info(f"  Producto {parte} actualizado exitosamente")
+
+
+def recuperar_estado(driver):
+    """Intenta cerrar modales abiertos y limpiar la busqueda."""
+    # Cerrar cualquier modal abierto
+    try:
+        modales_cerrar = driver.find_elements(
+            By.XPATH,
+            "//div[contains(@class,'modal')]//button[contains(@class,'close')]"
+            "|//button[@data-dismiss='modal']",
+        )
+        for btn in modales_cerrar:
+            try:
+                btn.click()
+                time.sleep(0.5)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Cerrar alertas pendientes
+    try:
+        driver.switch_to.alert.accept()
+    except NoAlertPresentException:
+        pass
+
+    # Limpiar campo de busqueda
+    try:
+        campo = driver.find_element(By.ID, "C_Descripcion")
+        campo.clear()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# APRENDIZAJE ADAPTATIVO
+# ---------------------------------------------------------------------------
+class AnalizadorFallos:
+    """
+    Registra patrones de error durante la ejección y activa ajustes automáticos
+    para reducir la probabilidad de que el mismo fallo se repita.
+    El historial acumulado se guarda en aprendizaje.json para persistir entre sesiones.
+    """
+
+    ARCHIVO = BASE_DIR / "aprendizaje.json"
+    UMBRAL = 3  # fallos del mismo tipo necesarios para activar un ajuste
+
+    def __init__(self):
+        self.historial = {}       # tipo_fallo -> count (sesión actual)
+        self.acumulado = {}       # tipo_fallo -> count (histórico)
+        self.ajustes_activos = set()
+        self._cargar()
+        # Activar ajustes que ya superaron el umbral en sesiones anteriores
+        for tipo, cnt in self.acumulado.items():
+            if cnt >= self.UMBRAL:
+                self.ajustes_activos.add(tipo)
+        if self.ajustes_activos:
+            log.info(
+                f"[APRENDIZAJE] Ajustes cargados de sesión anterior: "
+                f"{', '.join(self.ajustes_activos)}"
+            )
+
+    def _cargar(self):
+        try:
+            if self.ARCHIVO.exists():
+                data = json.loads(self.ARCHIVO.read_text(encoding="utf-8"))
+                self.acumulado = data.get("acumulado", {})
+        except Exception:
+            self.acumulado = {}
+
+    def registrar(self, tipo_fallo: str):
+        """Registra un fallo y activa ajustes si se supera el umbral."""
+        if not tipo_fallo:
+            return
+        self.historial[tipo_fallo] = self.historial.get(tipo_fallo, 0) + 1
+        self.acumulado[tipo_fallo] = self.acumulado.get(tipo_fallo, 0) + 1
+        count = self.historial[tipo_fallo]
+        if count >= self.UMBRAL and tipo_fallo not in self.ajustes_activos:
+            self.ajustes_activos.add(tipo_fallo)
+            log.info(
+                f"[APRENDIZAJE] Patrón detectado: '{tipo_fallo}' ocurrió {count} veces "
+                f"→ ajuste activado para el resto de la ejecución"
+            )
+
+    def wait_extra(self) -> float:
+        """Segundos de espera adicionales si hay timeouts recurrentes."""
+        return 5.0 if "Tiempo de espera agotado" in self.ajustes_activos else 0.0
+
+    def forzar_recarga(self) -> bool:
+        """True si debe recargar filtros antes de cada búsqueda."""
+        return "Producto no encontrado en la tabla" in self.ajustes_activos
+
+    def preferir_js(self) -> bool:
+        """True si debe preferir ejecución JS en vez de clic para abrir el modal."""
+        return "Modal de stock no se abrió" in self.ajustes_activos
+
+    def resumen(self) -> str:
+        if not self.ajustes_activos:
+            return "Sin ajustes activos"
+        desc = {
+            "Tiempo de espera agotado": "+5s de espera extra por producto",
+            "Producto no encontrado en la tabla": "recarga de filtros antes de buscar",
+            "Modal de stock no se abrió": "ejecución JS directa para modal",
+        }
+        return " | ".join(desc.get(a, a) for a in self.ajustes_activos)
+
+    def guardar(self):
+        try:
+            data = {
+                "acumulado": self.acumulado,
+                "ultima_sesion": str(datetime.now()),
+                "nota": "Generado automáticamente. Borra este archivo para resetear el aprendizaje.",
+            }
+            self.ARCHIVO.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            log.info(f"[APRENDIZAJE] Conocimiento guardado en: {self.ARCHIVO.name}")
+        except Exception as e:
+            log.warning(f"[APRENDIZAJE] No se pudo guardar: {e}")
+
+
+# ---------------------------------------------------------------------------
+# EJECUCION REUTILIZABLE (CLI + GUI)
+# ---------------------------------------------------------------------------
+def ejecutar_bot(
+    excel_path: Path,
+    acuerdo_texto: str,
+    catalogo_texto: str,
+    categoria_texto: str,
+    pausa_entre_productos: int = 2,
+):
+    """Ejecuta el flujo completo del bot con configuración dinámica."""
+    global EXCEL_PATH, ACUERDO_TEXTO, CATALOGO_TEXTO, CATEGORIA_TEXTO
+    global PAUSA_ENTRE_PRODUCTOS, REPORTE_PATH, RESULTADOS
+    global PAUSA_EVENTO, DETENER_EVENTO, ANALIZADOR
+    RESULTADOS = []
+    # Inicializar eventos para modo CLI (la GUI los crea en _worker_run antes de llamar acá)
+    if PAUSA_EVENTO is None:
+        PAUSA_EVENTO = threading.Event()
+        PAUSA_EVENTO.set()
+    if DETENER_EVENTO is None:
+        DETENER_EVENTO = threading.Event()
+    ANALIZADOR = AnalizadorFallos()
+    log.info(f"[APRENDIZAJE] Ajustes al inicio: {ANALIZADOR.resumen()}") 
+
+    EXCEL_PATH = Path(excel_path)
+    ACUERDO_TEXTO = acuerdo_texto
+    CATALOGO_TEXTO = catalogo_texto
+    CATEGORIA_TEXTO = categoria_texto
+    PAUSA_ENTRE_PRODUCTOS = pausa_entre_productos
+    REPORTE_PATH = nueva_ruta_reporte()
+
+    log.info("Iniciando Peru Compras Bot...")
+    log.info(f"Archivo Excel seleccionado: {EXCEL_PATH}")
+    log.info(f"Filtro acuerdo: {ACUERDO_TEXTO}")
+    log.info(f"Filtro catálogo: {CATALOGO_TEXTO}")
+    log.info(f"Filtro categoría: {CATEGORIA_TEXTO}")
+
+    df, resumen_excel = cargar_productos_excel(EXCEL_PATH)
+    log.info(f"Productos válidos cargados: {len(df)}")
+    for advertencia in resumen_excel.warnings:
+        log.warning(advertencia)
+
+    chrome_options = Options()
+    chrome_options.add_argument("--start-maximized")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    try:
+        paso1_login(driver)
+        paso2_navegacion(driver)
+        paso3_filtros(driver)
+        paso4_actualizar_stock(driver, df)
+        generar_reporte_excel(acuerdo_texto, catalogo_texto, categoria_texto)
+        if ANALIZADOR:
+            ANALIZADOR.guardar()
+        return REPORTE_PATH
+    finally:
+        driver.quit()
+        log.info("Navegador cerrado. Fin del script.")
+
+
+def main_cli():
+    """Modo clásico por consola."""
+    global MODO_GUI, EVENTO_LOGIN, GUI_NOTIFICAR_LOGIN
+    MODO_GUI = False
+    EVENTO_LOGIN = None
+    GUI_NOTIFICAR_LOGIN = None
+
+    try:
+        reporte = ejecutar_bot(
+            excel_path=EXCEL_PATH,
+            acuerdo_texto=ACUERDO_TEXTO,
+            catalogo_texto=CATALOGO_TEXTO,
+            categoria_texto=CATEGORIA_TEXTO,
+            pausa_entre_productos=PAUSA_ENTRE_PRODUCTOS,
+        )
+        print("\n" + "=" * 60)
+        print(f"Reporte guardado en: {reporte}")
+        input("Presiona ENTER para cerrar...")
+    except KeyboardInterrupt:
+        log.info("\nEjecucion interrumpida por el usuario.")
+    except Exception as e:
+        log.error(f"Error fatal: {e}", exc_info=True)
+
+

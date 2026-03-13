@@ -2,7 +2,7 @@
 ; Requires Inno Setup 6+
 
 #define MyAppName "Peru Compras Bot"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Peru Compras"
 #define MyAppExeName "peru_compras_bot.exe"
 
@@ -19,7 +19,9 @@ OutputBaseFilename=PeruComprasBot_Setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesInstallIn64BitMode=x64compatible
+SetupIconFile=assets\app_mascot.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"

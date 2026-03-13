@@ -1,0 +1,1 @@
+"""Peru Compras Bot application package."""

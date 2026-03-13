@@ -1,6 +1,6 @@
 # Peru Compras Bot
 
-Automatiza la actualización de stock en el portal [catalogos.perucompras.gob.pe](https://www.catalogos.perucompras.gob.pe) usando Selenium, con interfaz gráfica (Tkinter) y reporte Excel con gráficos.
+Automatiza la actualización de stock en el portal [catalogos.perucompras.gob.pe](https://www.catalogos.perucompras.gob.pe) usando Selenium, con interfaz gráfica (Tkinter), validación previa del Excel y reporte Excel con gráficos.
 
 ---
 
@@ -95,13 +95,20 @@ Genera `installer_output\PeruComprasBot_Setup.exe`.
 
 ## Uso de la interfaz gráfica
 
-1. **Selecciona el archivo Excel** con los productos a actualizar.
-2. Ajusta los **filtros** (Acuerdo Marco, Catálogo, Categoría) según tu contrato.
-3. Haz clic en **"Iniciar automatización"**.
-4. Chrome se abrirá automáticamente. **Inicia sesión** con tu usuario y contraseña en el portal.
-5. Regresa a la ventana del bot y haz clic en **"Ya inicié sesión (continuar)"**.
-6. El bot actualizará todos los productos. El progreso se muestra en tiempo real en el panel de log.
-7. Al finalizar, haz clic en **"Abrir último reporte"** para ver el reporte Excel con gráficos.
+1. **Selecciona el archivo Excel** con los productos a actualizar o descarga la plantilla si todavía no tienes uno.
+2. La aplicación hace una **validación previa** y te indica si hay columnas faltantes, stocks inválidos, filas vacías o advertencias por duplicados.
+3. Ajusta los **filtros** (Acuerdo Marco, Catálogo, Categoría) según tu contrato, o importa las opciones desde el portal.
+4. Haz clic en **"Iniciar actualización de stock"** solo cuando el panel indique que el archivo está listo.
+5. Chrome se abrirá automáticamente. **Inicia sesión** con tu usuario y contraseña en el portal.
+6. Regresa a la ventana del bot y haz clic en **"Ya inicié sesión, continuar"**.
+7. El bot actualizará todos los productos. El progreso y el estado operativo se muestran en tiempo real.
+8. Al finalizar, usa **"Abrir último reporte"** para revisar el Excel generado.
+
+### Qué cambió en la interfaz
+
+- La ventana principal ahora funciona como un **panel guiado**, con resumen de preparación, estado operativo y acciones rápidas.
+- El Excel se valida **antes** de ejecutar Selenium para evitar errores evitables a mitad del proceso.
+- El usuario ve un estado claro de si está **listo para ejecutar**, si necesita corregir el archivo o si debe iniciar sesión en Chrome.
 
 ---
 
@@ -147,12 +154,17 @@ pyinstaller>=5.13.0
 ## Estructura del proyecto
 
 ```
-peru_compras_bot.py     # Script principal (bot + GUI)
-productos.xlsx          # Archivo de productos a actualizar (no rastrear en git si tiene datos sensibles)
-requirements.txt        # Dependencias Python
-build_exe.bat           # Compila el .exe con PyInstaller
-build_installer.bat     # Compila el instalador con Inno Setup
-installer.iss           # Script de Inno Setup
+peru_compras_bot.py         # Entrypoint principal (GUI o CLI)
+peru_compras_bot_app/
+	automation.py            # Selenium, validación de Excel, reportes y ejecución CLI
+	gui.py                   # Interfaz Tkinter y orquestación visual
+	__init__.py
+productos.xlsx             # Archivo de productos a actualizar (no rastrear en git si tiene datos sensibles)
+requirements.txt           # Dependencias Python
+build_exe.bat              # Compila el .exe usando la spec existente
+build_installer.bat        # Compila el instalador con Inno Setup
+peru_compras_bot.spec      # Configuración de PyInstaller
+installer.iss              # Script de Inno Setup
 .gitignore
 README.md
 ```
