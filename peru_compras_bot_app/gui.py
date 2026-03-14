@@ -62,6 +62,9 @@ class _Tooltip:
 
 
 class PeruComprasGUI:
+    MODO_STOCK = "stock"
+    MODO_COBERTURA = "cobertura"
+
     # ── Paleta de colores ──────────────────────────────────────────────
     C_FONDO       = "#EEF2F6"
     C_SUPERFICIE  = "#FFFFFF"
@@ -98,6 +101,7 @@ class PeruComprasGUI:
         self.validation_summary = None
         self._portal_snapshot = {"acuerdos": 0, "catalogos": 0, "categorias": 0}
 
+        self.operation_var = tk.StringVar(value=self.MODO_STOCK)
         self.excel_var    = tk.StringVar(value=str(bot.BASE_DIR / "productos.xlsx"))
         self.acuerdo_var  = tk.StringVar(value=bot.ACUERDO_TEXTO)
         self.catalogo_var = tk.StringVar(value=bot.CATALOGO_TEXTO)
@@ -215,7 +219,7 @@ class PeruComprasGUI:
         ).pack(anchor="w")
         tk.Label(
             brand,
-            text="Panel de actualización de stock",
+            text="Panel de actualización y cobertura",
             bg=self.C_HEADER,
             fg="#FFFFFF",
             font=("Bahnschrift SemiBold", 21),
@@ -351,7 +355,7 @@ class PeruComprasGUI:
         workflow_panel, workflow_body = self._make_panel(
             body,
             "Flujo de trabajo",
-            "Todo el proceso principal queda en un solo recorrido visual.",
+            "Elige el tipo de mejora, valida el Excel y ejecuta el flujo correspondiente.",
         )
         workflow_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
 
@@ -362,7 +366,30 @@ class PeruComprasGUI:
         )
         sidebar_panel.grid(row=1, column=1, sticky="nsew", padx=(10, 0))
 
-        f1 = self._make_section(workflow_body, "1", "Archivo de productos", "Carga tu Excel y revisa la validación antes de correr el bot.")
+        f0 = self._make_section(workflow_body, "0", "Tipo de mejora", "Selecciona el apartado del portal que quieres automatizar.")
+
+        self.mode_combo = ttk.Combobox(
+            f0,
+            state="readonly",
+            values=["Precio y existencias", "Cobertura de atención"],
+        )
+        self.mode_combo.pack(fill="x")
+        self.mode_combo.set("Precio y existencias")
+        self.mode_combo.bind("<<ComboboxSelected>>", self._on_operation_changed)
+
+        self._mode_help_lbl = tk.Label(
+            f0,
+            text="Usa 'Precio y existencias' para actualizar stock por número de parte.",
+            bg=self.C_SUPERFICIE,
+            fg=self.C_TEXTO_SUAVE,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=620,
+        )
+        self._mode_help_lbl.pack(fill="x", pady=(10, 0))
+
+        f1 = self._make_section(workflow_body, "1", "Archivo de carga", "Carga tu Excel y revisa la validación antes de correr el bot.")
 
         fila_excel = ttk.Frame(f1)
         fila_excel.pack(fill="x", pady=(0, 8))
@@ -396,7 +423,7 @@ class PeruComprasGUI:
 
         tk.Label(
             f1,
-            text="El sistema revisa columnas, filas vacías, stock inválido y duplicados antes de permitir la ejecución.",
+            text="El sistema revisa columnas, filas vacías, valores inválidos y duplicados antes de permitir la ejecución.",
             bg=self.C_SUPERFICIE,
             fg=self.C_TEXTO_SUAVE,
             font=("Segoe UI", 9),
@@ -444,7 +471,7 @@ class PeruComprasGUI:
         )
         self._validation_examples_lbl.pack(anchor="w", pady=(6, 0))
 
-        f2 = self._make_section(workflow_body, "2", "Filtros del portal", "Trae las opciones desde Peru Compras o ajusta las predeterminadas.")
+        f2 = self._make_section(workflow_body, "2", "Filtros del portal", "Trae las opciones desde Peru Compras o ajusta las predeterminadas según el modo seleccionado.")
 
         aviso_f = tk.Frame(
             f2,
@@ -472,6 +499,18 @@ class PeruComprasGUI:
             style="Secundario.TButton",
         )
         self.btn_cargar_opts.pack(side="right", padx=(12, 0))
+
+        self._filter_mode_note_lbl = tk.Label(
+            f2,
+            text="En este modo se usan Acuerdo, Catálogo y Categoría.",
+            bg=self.C_SUPERFICIE,
+            fg=self.C_TEXTO_SUAVE,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=620,
+        )
+        self._filter_mode_note_lbl.pack(fill="x", pady=(0, 10))
 
         grid_f = tk.Frame(f2, bg=self.C_SUPERFICIE)
         grid_f.pack(fill="x")
@@ -813,6 +852,7 @@ class PeruComprasGUI:
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         self._sync_main_scroll_region()
+        self._aplicar_modo_operacion_ui()
 
     # ------------------------------------------------------------------
     # Helpers de construcción
@@ -977,16 +1017,62 @@ class PeruComprasGUI:
         self._readiness_title_lbl.configure(bg=estilo["card"], fg=estilo["fg"])
         self._readiness_detail_lbl.configure(bg=estilo["card"])
 
+    def _es_modo_cobertura(self) -> bool:
+        return self.operation_var.get() == self.MODO_COBERTURA
+
+    def _texto_operacion(self) -> str:
+        return "cobertura de atención" if self._es_modo_cobertura() else "precio y existencias"
+
+    def _on_operation_changed(self, _event=None):
+        nuevo_modo = self.MODO_COBERTURA if self.mode_combo.get() == "Cobertura de atención" else self.MODO_STOCK
+        self.operation_var.set(nuevo_modo)
+        self._aplicar_modo_operacion_ui()
+        self._analizar_excel_actual(silencioso=True)
+        self._actualizar_resumen_seleccion()
+
+    def _aplicar_modo_operacion_ui(self):
+        if self._es_modo_cobertura():
+            self._mode_help_lbl.configure(
+                text="Usa 'Cobertura de atención' para agregar regiones y su plazo máximo de entrega por acuerdo marco."
+            )
+            self._filter_mode_note_lbl.configure(
+                text="En cobertura solo se utiliza el Acuerdo Marco. Catálogo y Categoría se ignoran en la ejecución."
+            )
+            self.quick_status_var.set("Modo cobertura seleccionado")
+            self._set_banner(
+                "Modo cobertura activo: el Excel debe tener columnas de región y plazo.",
+                self.C_INFO_BG,
+                self.C_INFO_FG,
+            )
+        else:
+            self._mode_help_lbl.configure(
+                text="Usa 'Precio y existencias' para actualizar stock por número de parte."
+            )
+            self._filter_mode_note_lbl.configure(
+                text="En este modo se usan Acuerdo, Catálogo y Categoría."
+            )
+            self.quick_status_var.set("Modo precio y existencias seleccionado")
+            self._set_banner(
+                "Modo precio y existencias activo: el Excel debe tener columnas Parte y Stock.",
+                self.C_INFO_BG,
+                self.C_INFO_FG,
+            )
+
     def _actualizar_resumen_seleccion(self):
         archivo = Path(self.excel_var.get().strip()).name if self.excel_var.get().strip() else "sin archivo"
         acuerdo = self.acuerdo_var.get().strip() or "pendiente"
         catalogo = self.catalogo_var.get().strip() or "pendiente"
         categoria = self.categoria_var.get().strip() or "pendiente"
-        self.selection_summary_var.set(
-            f"Archivo: {archivo}\nAcuerdo: {acuerdo}\nCatálogo: {catalogo}\nCategoría: {categoria}\nPausa: {self.pausa_var.get().strip() or '2'} s"
-        )
+        if self._es_modo_cobertura():
+            self.selection_summary_var.set(
+                f"Modo: Cobertura de atención\nArchivo: {archivo}\nAcuerdo: {acuerdo}\nPlazo por archivo: sí\nPausa: {self.pausa_var.get().strip() or '2'} s"
+            )
+        else:
+            self.selection_summary_var.set(
+                f"Modo: Precio y existencias\nArchivo: {archivo}\nAcuerdo: {acuerdo}\nCatálogo: {catalogo}\nCategoría: {categoria}\nPausa: {self.pausa_var.get().strip() or '2'} s"
+            )
 
-    def _actualizar_resumen_excel_ui(self, resumen: bot.ExcelValidationSummary | None):
+    def _actualizar_resumen_excel_ui(self, resumen):
         if resumen is None:
             self.metric_archivo_var.set("Sin revisar")
             self.metric_productos_var.set("0")
@@ -1002,9 +1088,10 @@ class PeruComprasGUI:
         self.metric_archivo_var.set(resumen.file_path.name)
         self.metric_productos_var.set(str(resumen.valid_rows))
         self.metric_alertas_var.set(str(resumen.total_problem_rows + len(resumen.warnings)))
+        entidad = "región(es)" if self._es_modo_cobertura() else "producto(s)"
 
         if resumen.is_ready:
-            detalle = f"{resumen.valid_rows} producto(s) listos para procesar."
+            detalle = f"{resumen.valid_rows} {entidad} listo(s) para procesar."
             if resumen.warnings:
                 detalle += " Hay advertencias no bloqueantes para revisar."
             self._validation_box.configure(bg="#F0FDF4", highlightbackground="#86EFAC")
@@ -1128,14 +1215,18 @@ class PeruComprasGUI:
             self._actualizar_resumen_excel_ui(None)
             return None
 
-        resumen, _ = bot.analizar_excel_productos(Path(ruta))
+        if self._es_modo_cobertura():
+            resumen, _ = bot.analizar_excel_coberturas(Path(ruta))
+        else:
+            resumen, _ = bot.analizar_excel_productos(Path(ruta))
         self.validation_summary = resumen
         self._actualizar_resumen_excel_ui(resumen)
         self._actualizar_resumen_seleccion()
 
         if not silencioso:
             if resumen.is_ready:
-                mensaje = f"Archivo listo. {resumen.valid_rows} producto(s) podrán procesarse."
+                entidad = "región(es)" if self._es_modo_cobertura() else "producto(s)"
+                mensaje = f"Archivo listo. {resumen.valid_rows} {entidad} podrán procesarse."
                 if resumen.warnings:
                     mensaje += "\n\nAdvertencias:\n- " + "\n- ".join(resumen.warnings[:3])
                 messagebox.showinfo("Validación completada", mensaje)
@@ -1213,13 +1304,16 @@ class PeruComprasGUI:
             title="Guardar plantilla como…",
             defaultextension=".xlsx",
             filetypes=[("Excel", "*.xlsx")],
-            initialfile="plantilla_productos.xlsx",
+            initialfile="plantilla_coberturas.xlsx" if self._es_modo_cobertura() else "plantilla_productos.xlsx",
             initialdir=str(bot.BASE_DIR),
         )
         if not destino:
             return
         try:
-            bot.generar_plantilla_excel(Path(destino))
+            if self._es_modo_cobertura():
+                bot.generar_plantilla_cobertura_excel(Path(destino))
+            else:
+                bot.generar_plantilla_excel(Path(destino))
             if messagebox.askyesno(
                 "Plantilla creada",
                 f"Plantilla guardada en:\n{destino}\n\n"
@@ -1302,17 +1396,18 @@ class PeruComprasGUI:
             driver = bot.webdriver.Chrome(service=service, options=chrome_opts)
 
             bot.paso1_login(driver)
-            bot.paso2_navegacion(driver)
+            if self._es_modo_cobertura():
+                bot.paso2_navegacion_cobertura(driver)
+            else:
+                bot.paso2_navegacion(driver)
 
-            # --- Acuerdo Marco ---
             acuerdo_opts = bot.leer_opciones_select(driver, "ajaxAcuerdo")
             log.info(f"Opciones Acuerdo ({len(acuerdo_opts)}): {acuerdo_opts}")
 
-            # Seleccionar el Acuerdo actual (o el primero disponible)
             catalogo_opts = []
             categoria_opts = []
             acuerdo_actual = self.acuerdo_var.get().strip()
-            if acuerdo_opts:
+            if acuerdo_opts and not self._es_modo_cobertura():
                 try:
                     sel_a = bot.esperar_opciones_select(driver, "ajaxAcuerdo", bot.WAIT_LARGO)
                     texto_a = acuerdo_actual if acuerdo_actual else acuerdo_opts[0]
@@ -1323,9 +1418,8 @@ class PeruComprasGUI:
                 except Exception as e:
                     log.warning(f"No se pudo cargar catálogos: {e}")
 
-            # --- Catálogo → Categoría ---
             catalogo_actual = self.catalogo_var.get().strip()
-            if catalogo_opts:
+            if catalogo_opts and not self._es_modo_cobertura():
                 try:
                     sel_c = bot.esperar_opciones_select(driver, "ajaxCatalogo", bot.WAIT_LARGO)
                     texto_c = catalogo_actual if catalogo_actual else catalogo_opts[0]
@@ -1375,21 +1469,37 @@ class PeruComprasGUI:
         if categorias and not self.categoria_var.get():
             self.categoria_var.set(categorias[0])
 
+        if self._es_modo_cobertura():
+            self.catalogo_var.set("")
+            self.categoria_var.set("")
+
         self._actualizar_resumen_seleccion()
 
-        self._set_banner(
-            f"Filtros cargados: {len(acuerdos)} acuerdos, {len(catalogos)} catálogos y {len(categorias)} categorías.",
-            self.C_OK_BG, self.C_OK_FG,
-        )
-        self.quick_status_var.set("Filtros importados correctamente")
-        messagebox.showinfo(
-            "Filtros cargados",
-            f"Se cargaron desde el portal:\n"
-            f"  • {len(acuerdos)} Acuerdo(s) Marco\n"
-            f"  • {len(catalogos)} Catálogo(s)\n"
-            f"  • {len(categorias)} Categoría(s)\n\n"
-            f"Ahora selecciona los valores correctos en los desplegables del Paso 2.",
-        )
+        if self._es_modo_cobertura():
+            self._set_banner(
+                f"Filtros cargados: {len(acuerdos)} acuerdo(s) disponibles para cobertura.",
+                self.C_OK_BG, self.C_OK_FG,
+            )
+            self.quick_status_var.set("Acuerdos de cobertura importados correctamente")
+            messagebox.showinfo(
+                "Filtros cargados",
+                f"Se cargaron desde el portal {len(acuerdos)} acuerdo(s) marco para cobertura.\n\n"
+                "Ahora confirma el acuerdo correcto y ejecuta el proceso.",
+            )
+        else:
+            self._set_banner(
+                f"Filtros cargados: {len(acuerdos)} acuerdos, {len(catalogos)} catálogos y {len(categorias)} categorías.",
+                self.C_OK_BG, self.C_OK_FG,
+            )
+            self.quick_status_var.set("Filtros importados correctamente")
+            messagebox.showinfo(
+                "Filtros cargados",
+                f"Se cargaron desde el portal:\n"
+                f"  • {len(acuerdos)} Acuerdo(s) Marco\n"
+                f"  • {len(catalogos)} Catálogo(s)\n"
+                f"  • {len(categorias)} Categoría(s)\n\n"
+                f"Ahora selecciona los valores correctos en los desplegables del Paso 2.",
+            )
 
     # ------------------------------------------------------------------
     # Pausa / Detección / Aprendizaje
@@ -1486,7 +1596,13 @@ class PeruComprasGUI:
                 mensaje += "\n\nEjemplos detectados:\n- " + "\n- ".join(resumen.issue_examples[:4])
             messagebox.showerror("El archivo todavía no está listo", mensaje)
             return
-        if not acuerdo or not catalogo or not categoria:
+        if self._es_modo_cobertura() and not acuerdo:
+            messagebox.showerror(
+                "Filtros incompletos",
+                "Debes completar el Acuerdo Marco del Paso 2.\n\nUsa 'Importar opciones del portal' si el desplegable está vacío.",
+            )
+            return
+        if not self._es_modo_cobertura() and (not acuerdo or not catalogo or not categoria):
             messagebox.showerror(
                 "Filtros incompletos",
                 "Debes completar los tres filtros del Paso 2:\n"
@@ -1511,22 +1627,22 @@ class PeruComprasGUI:
         self.btn_pausar.configure(text="Pausar")
         self._pausado = False
         self._set_banner("Iniciando automatización y abriendo Chrome...", self.C_INFO_BG, self.C_INFO_FG)
-        self.quick_status_var.set("Ejecutando automatización")
+        self.quick_status_var.set(f"Ejecutando automatización de {self._texto_operacion()}")
         self._aplicar_estado_preparacion(
             "Automatización en curso",
-            "El bot está trabajando. Puedes pausar, detener o seguir el progreso desde esta pantalla.",
+            f"El bot está trabajando en {self._texto_operacion()}. Puedes pausar, detener o seguir el progreso desde esta pantalla.",
             "info",
         )
         self._actualizar_resumen_seleccion()
 
         self.worker = threading.Thread(
             target=self._worker_run,
-            args=(excel, acuerdo, catalogo, categoria, pausa),
+            args=(excel, acuerdo, catalogo, categoria, pausa, self.operation_var.get()),
             daemon=True,
         )
         self.worker.start()
 
-    def _worker_run(self, excel, acuerdo, catalogo, categoria, pausa):
+    def _worker_run(self, excel, acuerdo, catalogo, categoria, pausa, modo):
         bot.MODO_GUI = True
         bot.EVENTO_LOGIN = self.login_event
         bot.GUI_NOTIFICAR_LOGIN = self._notificar_login_ui
@@ -1535,19 +1651,27 @@ class PeruComprasGUI:
         bot.DETENER_EVENTO = threading.Event()
 
         try:
-            reporte = bot.ejecutar_bot(
-                excel_path=excel,
-                acuerdo_texto=acuerdo,
-                catalogo_texto=catalogo,
-                categoria_texto=categoria,
-                pausa_entre_productos=pausa,
-            )
+            if modo == self.MODO_COBERTURA:
+                reporte = bot.ejecutar_bot_cobertura(
+                    excel_path=excel,
+                    acuerdo_texto=acuerdo,
+                    pausa_entre_productos=pausa,
+                )
+            else:
+                reporte = bot.ejecutar_bot(
+                    excel_path=excel,
+                    acuerdo_texto=acuerdo,
+                    catalogo_texto=catalogo,
+                    categoria_texto=categoria,
+                    pausa_entre_productos=pausa,
+                )
             self.reporte_generado = reporte
             total = len(bot.RESULTADOS)
             exitos = sum(1 for r in bot.RESULTADOS if r["Estado"] == "EXITO")
             fallos = total - exitos
+            etiqueta = "región(es)" if modo == self.MODO_COBERTURA else "producto(s)"
             info = (
-                f"{exitos} producto(s) actualizados correctamente"
+                f"{exitos} {etiqueta} actualizados correctamente"
                 + (f"   ·   {fallos} con error(es)" if fallos else "")
                 + f"\n\nReporte guardado en:\n{reporte}"
             )
@@ -1556,7 +1680,7 @@ class PeruComprasGUI:
             self.root.after(0, lambda: self._mostrar_panel_ctrl(False))
             self.root.after(0, lambda: self._mostrar_panel_resultado(True))
             self.root.after(0, lambda: self._set_banner(
-                f"Proceso completado: {exitos}/{total} productos actualizados.",
+                f"Proceso completado: {exitos}/{total} {etiqueta} actualizados.",
                 self.C_OK_BG, self.C_OK_FG,
             ))
             self.root.after(0, lambda: self._actualizar_progreso(total, total, "Completado"))

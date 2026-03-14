@@ -19,6 +19,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+import unicodedata
 
 import pandas as pd
 from openpyxl import Workbook as _OxlWorkbook
@@ -50,11 +51,13 @@ EXCEL_PATH = BASE_DIR / "productos.xlsx"  # Ruta al archivo Excel
 BASE_URL = "https://www.catalogos.perucompras.gob.pe"
 LOGIN_URL = f"{BASE_URL}/AccesoGeneral"
 MEJORA_URL = f"{BASE_URL}/MejoraBasica"
+MEJORA_COBERTURA_URL = f"{BASE_URL}/MejoraCobertura"
 
 # Textos visibles de los selectores de filtro
 ACUERDO_TEXTO = "EXT-CE-2022-5 COMPUTADORAS DE ESCRITORIO"
 CATALOGO_TEXTO = "COMPUTADORAS DE ESCRITORIO"
 CATEGORIA_TEXTO = "MONITOR"
+ACUERDO_COBERTURA_TEXTO = "EXT-CE-2022-5 COMPUTADORAS DE ESCRITORIO"
 
 # Tiempos de espera (segundos)
 WAIT_NORMAL = 15
@@ -126,6 +129,37 @@ class ExcelValidationSummary:
         return "Pendiente de revisión"
 
 
+@dataclass
+class CoberturaValidationSummary:
+    file_path: Path
+    total_rows: int = 0
+    valid_rows: int = 0
+    empty_rows: int = 0
+    missing_region_rows: int = 0
+    invalid_deadline_rows: int = 0
+    duplicate_regions: int = 0
+    missing_columns: tuple[str, ...] = ()
+    warnings: list[str] = field(default_factory=list)
+    blocking_issues: list[str] = field(default_factory=list)
+    issue_examples: list[str] = field(default_factory=list)
+
+    @property
+    def total_problem_rows(self) -> int:
+        return self.missing_region_rows + self.invalid_deadline_rows
+
+    @property
+    def is_ready(self) -> bool:
+        return not self.blocking_issues and self.valid_rows > 0
+
+    @property
+    def status_label(self) -> str:
+        if self.is_ready:
+            return "Listo para ejecutar"
+        if self.blocking_issues:
+            return "Requiere correcciones"
+        return "Pendiente de revisión"
+
+
 def _normalizar_parte(valor) -> str:
     if pd.isna(valor):
         return ""
@@ -160,6 +194,76 @@ def _normalizar_stock(valor) -> int:
     return numero_entero
 
 
+def _normalizar_texto_busqueda(valor) -> str:
+    texto = str(valor or "").strip().lower()
+    texto = "".join(
+        caracter for caracter in unicodedata.normalize("NFD", texto)
+        if unicodedata.category(caracter) != "Mn"
+    )
+    return re.sub(r"\s+", " ", texto)
+
+
+def _resolver_columnas_cobertura(columnas) -> dict[str, str | None]:
+    normalizadas = {
+        _normalizar_texto_busqueda(columna).replace("_", "").replace("-", "").replace(" ", ""): columna
+        for columna in columnas
+    }
+
+    candidatos_region = [
+        "region",
+        "regiones",
+        "departamento",
+        "departamentos",
+        "cobertura",
+    ]
+    candidatos_plazo = [
+        "plazo",
+        "plazodias",
+        "plazoentrega",
+        "plazoentregamaximo",
+        "dias",
+        "diascalendario",
+        "plazomaximo",
+    ]
+
+    region = next((normalizadas[key] for key in candidatos_region if key in normalizadas), None)
+    plazo = next((normalizadas[key] for key in candidatos_plazo if key in normalizadas), None)
+    return {"Region": region, "Plazo": plazo}
+
+
+def _normalizar_region(valor) -> str:
+    if pd.isna(valor):
+        return ""
+    texto = str(valor).strip()
+    return "" if texto.lower() == "nan" else texto
+
+
+def _normalizar_plazo(valor) -> int:
+    if pd.isna(valor):
+        raise ValueError("vacío")
+
+    if isinstance(valor, str):
+        texto = valor.strip().replace(",", ".")
+        if not texto:
+            raise ValueError("vacío")
+        if not re.fullmatch(r"\d+(?:\.0+)?", texto):
+            raise ValueError("debe ser un número entero entre 1 y 90")
+        numero = float(texto)
+    else:
+        try:
+            numero = float(valor)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("debe ser un número entero entre 1 y 90") from exc
+
+    if not numero.is_integer():
+        raise ValueError("debe ser un número entero entre 1 y 90")
+
+    numero_entero = int(numero)
+    if numero_entero < 1 or numero_entero > 90:
+        raise ValueError("debe estar entre 1 y 90")
+    return numero_entero
+
+
 def analizar_excel_productos(excel_path: Path) -> tuple[ExcelValidationSummary, pd.DataFrame]:
     """Lee y valida el Excel antes de ejecutar Selenium."""
     ruta = Path(excel_path)
@@ -187,10 +291,9 @@ def analizar_excel_productos(excel_path: Path) -> tuple[ExcelValidationSummary, 
         return resumen, pd.DataFrame(columns=["Parte", "Stock"])
 
     registros_validos = []
-    for indice, fila in raw_df.iterrows():
+    for fila_excel, (_, fila) in enumerate(raw_df.iterrows(), start=2):
         parte = _normalizar_parte(fila.get("Parte"))
         stock_raw = fila.get("Stock")
-        fila_excel = int(indice) + 2
 
         if not parte and (pd.isna(stock_raw) or str(stock_raw).strip() == ""):
             resumen.empty_rows += 1
@@ -251,6 +354,99 @@ def cargar_productos_excel(excel_path: Path) -> tuple[pd.DataFrame, ExcelValidat
         detalle = "\n".join(f"- {item}" for item in resumen.blocking_issues)
         ejemplos = "\n".join(f"- {item}" for item in resumen.issue_examples)
         mensaje = ["El archivo Excel necesita correcciones antes de continuar:", detalle]
+        if ejemplos:
+            mensaje.extend(["", "Ejemplos detectados:", ejemplos])
+        raise ValueError("\n".join(mensaje))
+    return df_limpio, resumen
+
+
+def analizar_excel_coberturas(excel_path: Path) -> tuple[CoberturaValidationSummary, pd.DataFrame]:
+    ruta = Path(excel_path)
+    resumen = CoberturaValidationSummary(file_path=ruta)
+
+    if not ruta.exists():
+        resumen.blocking_issues.append("No se encontró el archivo Excel seleccionado.")
+        return resumen, pd.DataFrame(columns=["Region", "Plazo"])
+
+    try:
+        raw_df = pd.read_excel(ruta)
+    except Exception as exc:
+        resumen.blocking_issues.append(f"No se pudo abrir el archivo: {exc}")
+        return resumen, pd.DataFrame(columns=["Region", "Plazo"])
+
+    resumen.total_rows = len(raw_df)
+    columnas = _resolver_columnas_cobertura(raw_df.columns)
+    faltantes = [alias for alias, origen in columnas.items() if not origen]
+    if faltantes:
+        resumen.missing_columns = tuple(faltantes)
+        resumen.blocking_issues.append(
+            "Faltan columnas obligatorias para cobertura: Región y/o Plazo."
+        )
+        return resumen, pd.DataFrame(columns=["Region", "Plazo"])
+
+    registros_validos = []
+    for fila_excel, (_, fila) in enumerate(raw_df.iterrows(), start=2):
+        region = _normalizar_region(fila.get(columnas["Region"]))
+        plazo_raw = fila.get(columnas["Plazo"])
+
+        if not region and (pd.isna(plazo_raw) or str(plazo_raw).strip() == ""):
+            resumen.empty_rows += 1
+            continue
+
+        if not region:
+            resumen.missing_region_rows += 1
+            if len(resumen.issue_examples) < 4:
+                resumen.issue_examples.append(f"Fila {fila_excel}: falta la región.")
+            continue
+
+        try:
+            plazo = _normalizar_plazo(plazo_raw)
+        except ValueError as exc:
+            resumen.invalid_deadline_rows += 1
+            if len(resumen.issue_examples) < 4:
+                resumen.issue_examples.append(
+                    f"Fila {fila_excel} ({region}): plazo {exc}."
+                )
+            continue
+
+        registros_validos.append({"Region": region, "Plazo": plazo})
+
+    df_limpio = pd.DataFrame(registros_validos, columns=["Region", "Plazo"])
+    resumen.valid_rows = len(df_limpio)
+
+    if not df_limpio.empty:
+        regiones_normalizadas = df_limpio["Region"].map(_normalizar_texto_busqueda)
+        duplicados = int(regiones_normalizadas.duplicated(keep=False).sum())
+        resumen.duplicate_regions = duplicados
+        if duplicados:
+            resumen.warnings.append(
+                f"Hay {duplicados} fila(s) con regiones repetidas. Se procesarán en el orden del archivo."
+            )
+
+    if resumen.missing_region_rows:
+        resumen.blocking_issues.append(
+            f"Hay {resumen.missing_region_rows} fila(s) sin región."
+        )
+    if resumen.invalid_deadline_rows:
+        resumen.blocking_issues.append(
+            f"Hay {resumen.invalid_deadline_rows} fila(s) con plazo inválido."
+        )
+    if resumen.valid_rows == 0 and not resumen.blocking_issues:
+        resumen.blocking_issues.append("No hay coberturas válidas para procesar.")
+    if resumen.empty_rows:
+        resumen.warnings.append(
+            f"Se ignorarán {resumen.empty_rows} fila(s) vacías en el Excel."
+        )
+
+    return resumen, df_limpio
+
+
+def cargar_coberturas_excel(excel_path: Path) -> tuple[pd.DataFrame, CoberturaValidationSummary]:
+    resumen, df_limpio = analizar_excel_coberturas(excel_path)
+    if resumen.blocking_issues:
+        detalle = "\n".join(f"- {item}" for item in resumen.blocking_issues)
+        ejemplos = "\n".join(f"- {item}" for item in resumen.issue_examples)
+        mensaje = ["El archivo Excel de coberturas necesita correcciones antes de continuar:", detalle]
         if ejemplos:
             mensaje.extend(["", "Ejemplos detectados:", ejemplos])
         raise ValueError("\n".join(mensaje))
@@ -426,6 +622,83 @@ def generar_plantilla_excel(destino: Path):
             cell.font = fnt
         cell.alignment = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
         ws2.row_dimensions[i].height = 18 if texto else 8
+
+    wb.save(destino)
+
+
+def generar_plantilla_cobertura_excel(destino: Path):
+    wb = _OxlWorkbook()
+
+    def fill(color):
+        return _OxlFill("solid", fgColor=color)
+
+    def font(bold=False, size=10, color="000000", italic=False):
+        return _OxlFont(name="Calibri", bold=bold, size=size, color=color, italic=italic)
+
+    borde = _OxlBorder(
+        left=_OxlSide(style="thin", color="BFBFBF"),
+        right=_OxlSide(style="thin", color="BFBFBF"),
+        top=_OxlSide(style="thin", color="BFBFBF"),
+        bottom=_OxlSide(style="thin", color="BFBFBF"),
+    )
+    ac = _OxlAlignment(horizontal="center", vertical="center", wrap_text=False)
+
+    ws = wb.active
+    ws.title = "Coberturas"
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 22
+
+    ws.merge_cells("A1:B1")
+    cell = ws["A1"]
+    cell.value = "Plantilla de Coberturas — Peru Compras Bot"
+    cell.font = font(bold=True, size=13, color="FFFFFF")
+    cell.fill = fill("00205B")
+    cell.alignment = ac
+
+    ws.merge_cells("A2:B2")
+    cell = ws["A2"]
+    cell.value = "Completa las columnas 'Region' y 'Plazo' desde la fila 4. El plazo debe estar entre 1 y 90 días calendarios."
+    cell.font = font(italic=True, size=9, color="595959")
+    cell.alignment = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
+
+    encabezados = [("Region", "1F4E79"), ("Plazo", "1F4E79")]
+    for col, (txt, color_fll) in enumerate(encabezados, start=1):
+        celda = ws.cell(row=4, column=col, value=txt)
+        celda.fill = fill(color_fll)
+        celda.font = font(bold=True, size=11, color="FFFFFF")
+        celda.border = borde
+        celda.alignment = ac
+
+    ejemplos = [("AMAZONAS", 5), ("CUSCO", 7), ("PIURA", 10)]
+    for i, (region, plazo) in enumerate(ejemplos, start=5):
+        color = "EBF3FB" if i % 2 == 0 else "FFFFFF"
+        for col, value in enumerate((region, plazo), start=1):
+            celda = ws.cell(row=i, column=col, value=value)
+            celda.fill = fill(color)
+            celda.font = font(size=10, color="595959")
+            celda.border = borde
+            celda.alignment = ac if col == 2 else _OxlAlignment(horizontal="left", vertical="center")
+
+    ws2 = wb.create_sheet("Instrucciones")
+    ws2.sheet_view.showGridLines = False
+    ws2.column_dimensions["A"].width = 8
+    ws2.column_dimensions["B"].width = 70
+    instrucciones = [
+        "1. Usa la hoja 'Coberturas' para registrar una región por fila.",
+        "2. La columna Region debe contener el nombre del departamento o región que deseas agregar.",
+        "3. La columna Plazo debe contener un entero entre 1 y 90 días calendarios.",
+        "4. Si una región ya existe en el portal, el bot la marcará como no disponible para agregar.",
+        "5. El portal muestra solo regiones faltantes en el modal de alta, por eso conviene cargar solo las pendientes.",
+    ]
+    for indice, texto in enumerate(instrucciones, start=1):
+        ws2.merge_cells(f"A{indice}:B{indice}")
+        celda = ws2[f"A{indice}"]
+        celda.value = texto
+        celda.font = font(size=10, color="333333")
+        celda.fill = fill("FFFFFF")
+        celda.border = borde
+        celda.alignment = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
 
     wb.save(destino)
 
@@ -663,6 +936,102 @@ def generar_reporte_excel(acuerdo_texto: str = "", catalogo_texto: str = "", cat
     return REPORTE_PATH
 
 
+def generar_reporte_cobertura_excel(acuerdo_texto: str = ""):
+    wb = _OxlWorkbook()
+    total = len(RESULTADOS)
+    exitos = sum(1 for r in RESULTADOS if r["Estado"] == "EXITO")
+    fallos = total - exitos
+
+    def fill(color):
+        return _OxlFill("solid", fgColor=color)
+
+    def font(bold=False, size=10, color="000000"):
+        return _OxlFont(name="Calibri", bold=bold, size=size, color=color)
+
+    borde = _OxlBorder(
+        left=_OxlSide(style="thin", color="BFBFBF"),
+        right=_OxlSide(style="thin", color="BFBFBF"),
+        top=_OxlSide(style="thin", color="BFBFBF"),
+        bottom=_OxlSide(style="thin", color="BFBFBF"),
+    )
+    ac = _OxlAlignment(horizontal="center", vertical="center", wrap_text=False)
+    al = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
+
+    def celda(ws, row, col, value, fll=None, fnt=None, aln=None):
+        c = ws.cell(row=row, column=col, value=value)
+        if fll:
+            c.fill = fll
+        if fnt:
+            c.font = fnt
+        c.border = borde
+        c.alignment = aln or ac
+        return c
+
+    ws_res = wb.active
+    ws_res.title = "Resumen"
+    ws_res.sheet_view.showGridLines = False
+    ws_res.column_dimensions["A"].width = 32
+    ws_res.column_dimensions["B"].width = 14
+    ws_res.column_dimensions["C"].width = 16
+
+    ws_res.merge_cells("A1:C1")
+    celda = ws_res["A1"]
+    celda.value = "PERU COMPRAS BOT — Reporte de Cobertura de Atención"
+    celda.font = font(bold=True, size=14, color="FFFFFF")
+    celda.fill = fill("00205B")
+    celda.alignment = ac
+
+    ws_res.merge_cells("A2:C2")
+    ws_res["A2"].value = f"Generado el {datetime.now():%d/%m/%Y a las %H:%M:%S}"
+    ws_res["A2"].alignment = ac
+
+    ws_res.merge_cells("A3:C3")
+    ws_res["A3"].value = f"Acuerdo Marco: {acuerdo_texto}"
+    ws_res["A3"].alignment = al
+
+    for col, txt in enumerate(["Resultado", "Cantidad", "Porcentaje"], start=1):
+        celda(ws_res, 5, col, txt, fill("1F4E79"), font(bold=True, size=11, color="FFFFFF"))
+
+    pct_e = f"{exitos / total * 100:.1f}%" if total else "0.0%"
+    pct_f = f"{fallos / total * 100:.1f}%" if total else "0.0%"
+    for col, val in enumerate(["Regiones agregadas", exitos, pct_e], start=1):
+        celda(ws_res, 6, col, val, fill("C6EFCE"), font(bold=True, color="375623"))
+    for col, val in enumerate(["Con error", fallos, pct_f], start=1):
+        celda(ws_res, 7, col, val, fill("FFC7CE"), font(bold=True, color="9C0006"))
+    for col, val in enumerate(["Total", total, "100%"], start=1):
+        celda(ws_res, 8, col, val, fill("D9E1F2"), font(bold=True))
+
+    ws_det = wb.create_sheet("Detalle por Región")
+    ws_det.sheet_view.showGridLines = False
+    headers = ["#", "Región", "Plazo", "Estado", "Tipo de Fallo", "Descripción", "Duración (seg)"]
+    for col, header in enumerate(headers, start=1):
+        celda(ws_det, 2, col, header, fill("2E75B6"), font(bold=True, size=10, color="FFFFFF"))
+
+    for i, resultado in enumerate(RESULTADOS, start=1):
+        fila = i + 2
+        ok = resultado["Estado"] == "EXITO"
+        color = fill("C6EFCE") if ok else fill("FFC7CE")
+        color_texto = "375623" if ok else "9C0006"
+        valores = [
+            i,
+            resultado.get("Region", ""),
+            resultado.get("Plazo", ""),
+            resultado.get("Estado", ""),
+            resultado.get("Tipo de Fallo", "—") or "—",
+            resultado.get("Descripción", ""),
+            resultado.get("Duración (seg)", 0),
+        ]
+        for col, valor in enumerate(valores, start=1):
+            celda(ws_det, fila, col, valor, color, font(bold=True, size=9, color=color_texto), al if col in (2, 5, 6) else ac)
+
+    for letra, ancho in {"A": 5, "B": 24, "C": 12, "D": 10, "E": 28, "F": 46, "G": 14}.items():
+        ws_det.column_dimensions[letra].width = ancho
+
+    wb.save(REPORTE_PATH)
+    log.info(f"Reporte Excel generado: {REPORTE_PATH}")
+    return REPORTE_PATH
+
+
 # ---------------------------------------------------------------------------
 # HELPERS DE SELENIUM
 # ---------------------------------------------------------------------------
@@ -760,6 +1129,20 @@ def leer_opciones_select(driver, select_id, timeout=WAIT_NORMAL):
         return []
 
 
+def seleccionar_por_texto_flexible(select_obj: Select, texto_objetivo: str):
+    objetivo = _normalizar_texto_busqueda(texto_objetivo)
+    for opcion in select_obj.options:
+        texto = opcion.text.strip()
+        texto_normalizado = _normalizar_texto_busqueda(texto)
+        if not texto or opcion.get_attribute("value") in ("", "0"):
+            continue
+        if objetivo == texto_normalizado or objetivo in texto_normalizado or texto_normalizado in objetivo:
+            select_obj.select_by_visible_text(texto)
+            log.info(f"    Seleccionado: {texto}")
+            return True
+    raise NoSuchElementException(f"No se encontró opción compatible con '{texto_objetivo}'")
+
+
 # ---------------------------------------------------------------------------
 # PASO 1: LOGIN Y VERIFICACION
 # ---------------------------------------------------------------------------
@@ -853,6 +1236,234 @@ def paso2_navegacion(driver):
         )
         driver.get(MEJORA_URL)
         time.sleep(3)
+
+
+def paso2_navegacion_cobertura(driver):
+    """Navega a la sección de Cobertura de atención."""
+    log.info("=" * 60)
+    log.info("PASO 2: Navegación a Cobertura de atención")
+    log.info("=" * 60)
+
+    driver.back()
+    time.sleep(2)
+    driver.get(BASE_URL)
+    time.sleep(2)
+    log.info("Retroceso ejecutado para desbloquear menú.")
+
+    driver.get(MEJORA_COBERTURA_URL)
+    time.sleep(3)
+    if "MejoraCobertura" in driver.current_url:
+        log.info(f"Navegación exitosa a: {driver.current_url}")
+        return
+
+    log.info("Intentando navegación por menú lateral...")
+    try:
+        submenu = esperar_clickeable(
+            driver,
+            By.XPATH,
+            "//a[contains(@href,'MejoraCobertura')]"
+            "|//a[contains(text(),'Cobertura de atención')]"
+            "|//a[contains(text(),'Cobertura de atencion')]",
+        )
+        submenu.click()
+        time.sleep(2)
+        log.info(f"Navegación por menú completada. URL: {driver.current_url}")
+    except TimeoutException:
+        log.warning("No se pudo navegar por menú. Se reintenta URL directa...")
+        driver.get(MEJORA_COBERTURA_URL)
+        time.sleep(3)
+
+
+def paso3_filtros_cobertura(driver):
+    log.info("=" * 60)
+    log.info("PASO 3: Configuración de cobertura")
+    log.info("=" * 60)
+
+    select_acuerdo = esperar_opciones_select(driver, "ajaxAcuerdo", WAIT_LARGO)
+    try:
+        seleccionar_por_texto_parcial(select_acuerdo, ACUERDO_COBERTURA_TEXTO)
+    except NoSuchElementException:
+        opciones_validas = [opt for opt in select_acuerdo.options if opt.get_attribute("value") not in ("", "0")]
+        if len(opciones_validas) == 1:
+            select_acuerdo.select_by_visible_text(opciones_validas[0].text)
+            log.info(f"    Seleccionado único acuerdo disponible: {opciones_validas[0].text}")
+        else:
+            raise
+
+    boton_buscar = esperar_clickeable(driver, By.ID, "btnBuscar")
+    boton_buscar.click()
+    time.sleep(3)
+    log.info("Listado de coberturas cargado correctamente.")
+
+
+def _esperar_tabla_cobertura(driver, timeout=WAIT_LARGO):
+    return WebDriverWait(driver, timeout).until(
+        EC.presence_of_element_located((By.ID, "TablaCoberturas"))
+    )
+
+
+def _abrir_modal_cobertura(driver):
+    boton = esperar_clickeable(driver, By.ID, "btn_cobertura", WAIT_LARGO)
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", boton)
+    _sleep_controlado(0.4)
+    try:
+        boton.click()
+    except Exception:
+        onclick_value = boton.get_attribute("onclick") or ""
+        if onclick_value:
+            driver.execute_script(onclick_value)
+        else:
+            raise
+
+
+def _esperar_modal_agregar_region(driver, timeout=WAIT_LARGO):
+    WebDriverWait(driver, timeout).until(
+        EC.visibility_of_element_located((By.ID, "ajaxDepartamento"))
+    )
+    return esperar_opciones_select(driver, "ajaxDepartamento", timeout)
+
+
+def _seleccionar_region_modal(driver, select_region: Select, region: str):
+    seleccionar_por_texto_flexible(select_region, region)
+    driver.execute_script(
+        "const sel = arguments[0]; sel.dispatchEvent(new Event('change', {bubbles: true}));",
+        select_region._el,
+    )
+    _sleep_controlado(0.5)
+
+
+def _guardar_cobertura(driver, plazo: int):
+    campo_plazo = esperar_elemento(driver, By.ID, "N_PlazoEntrega", WAIT_CORTO)
+    campo_plazo.clear()
+    campo_plazo.send_keys(str(plazo))
+    _sleep_controlado(0.3)
+
+    boton_guardar = esperar_clickeable(driver, By.ID, "btnGuardar", WAIT_CORTO)
+    boton_guardar.click()
+    _sleep_controlado(1.0)
+
+    try:
+        aceptar_alerta(driver, timeout=WAIT_CORTO)
+    except Exception:
+        pass
+    manejar_confirmacion_sweetalert(driver, timeout=WAIT_CORTO)
+
+    WebDriverWait(driver, WAIT_LARGO).until(
+        EC.invisibility_of_element_located((By.ID, "ajaxDepartamento"))
+    )
+    _esperar_tabla_cobertura(driver, timeout=WAIT_LARGO)
+
+
+def actualizar_cobertura_region(driver, region: str, plazo: int):
+    _abrir_modal_cobertura(driver)
+    select_region = _esperar_modal_agregar_region(driver, WAIT_LARGO)
+
+    opciones = [
+        opt.text.strip() for opt in select_region.options
+        if opt.get_attribute("value") not in ("", "0") and opt.text.strip()
+    ]
+    if not opciones:
+        raise TimeoutException("El portal no devolvió regiones disponibles para agregar")
+
+    try:
+        _seleccionar_region_modal(driver, select_region, region)
+    except NoSuchElementException as exc:
+        raise NoSuchElementException(
+            f"La región '{region}' no está disponible para agregar en el portal."
+        ) from exc
+
+    _guardar_cobertura(driver, plazo)
+    log.info(f"  Región {region} registrada con plazo {plazo} días")
+
+
+def paso4_actualizar_cobertura(driver, df: pd.DataFrame):
+    log.info("=" * 60)
+    log.info(f"PASO 4: Actualización de cobertura ({len(df)} regiones)")
+    log.info("=" * 60)
+
+    total = len(df)
+    exitos = 0
+    fallos = 0
+    _esperar_tabla_cobertura(driver, timeout=WAIT_LARGO)
+
+    for idx, fila in df.iterrows():
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            log.warning("Detención solicitada. Se cierra el procesamiento antes de la siguiente región.")
+            break
+
+        _esperar_controles_ejecucion()
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            break
+
+        region = str(fila["Region"]).strip()
+        plazo = int(fila["Plazo"])
+        log.info(f"\n--- Región {int(idx) + 1}/{total}: Región={region}, Plazo={plazo} ---")
+
+        t_inicio = time.time()
+        try:
+            actualizar_cobertura_region(driver, region, plazo)
+            RESULTADOS.append({
+                "Region": region,
+                "Plazo": plazo,
+                "Estado": "EXITO",
+                "Tipo de Fallo": "",
+                "Descripción": "Cobertura registrada correctamente",
+                "Duración (seg)": round(time.time() - t_inicio, 1),
+            })
+            log.info(f"  [OK] {region} -> Cobertura registrada correctamente")
+            exitos += 1
+        except Exception as exc:
+            tipo_fallo = clasificar_error(str(exc))
+            if ANALIZADOR:
+                ANALIZADOR.registrar(tipo_fallo)
+            RESULTADOS.append({
+                "Region": region,
+                "Plazo": plazo,
+                "Estado": "FALLO",
+                "Tipo de Fallo": tipo_fallo,
+                "Descripción": str(exc),
+                "Duración (seg)": round(time.time() - t_inicio, 1),
+            })
+            log.error(f"  Error procesando región {region}: {exc}")
+            fallos += 1
+            try:
+                recuperar_estado_cobertura(driver)
+            except Exception:
+                log.warning("  No se pudo recuperar estado en cobertura. Recargando página...")
+                driver.get(MEJORA_COBERTURA_URL)
+                time.sleep(3)
+                paso3_filtros_cobertura(driver)
+
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            break
+        _sleep_controlado(PAUSA_ENTRE_PRODUCTOS)
+
+    log.info("=" * 60)
+    log.info(f"RESULTADO FINAL: {exitos} exitosos, {fallos} fallidos de {total} total")
+    log.info(f"Reporte guardado en: {REPORTE_PATH}")
+    log.info("=" * 60)
+
+
+def recuperar_estado_cobertura(driver):
+    try:
+        botones = driver.find_elements(
+            By.XPATH,
+            "//div[contains(@class,'modal')]//button[contains(@class,'close')]"
+            "|//button[@data-dismiss='modal']",
+        )
+        for boton in botones:
+            try:
+                boton.click()
+                time.sleep(0.4)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        driver.switch_to.alert.accept()
+    except NoAlertPresentException:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1341,6 +1952,60 @@ def ejecutar_bot(
         paso3_filtros(driver)
         paso4_actualizar_stock(driver, df)
         generar_reporte_excel(acuerdo_texto, catalogo_texto, categoria_texto)
+        if ANALIZADOR:
+            ANALIZADOR.guardar()
+        return REPORTE_PATH
+    finally:
+        driver.quit()
+        log.info("Navegador cerrado. Fin del script.")
+
+
+def ejecutar_bot_cobertura(
+    excel_path: Path,
+    acuerdo_texto: str,
+    pausa_entre_productos: int = 2,
+):
+    global EXCEL_PATH, ACUERDO_COBERTURA_TEXTO
+    global PAUSA_ENTRE_PRODUCTOS, REPORTE_PATH, RESULTADOS
+    global PAUSA_EVENTO, DETENER_EVENTO, ANALIZADOR
+    RESULTADOS = []
+    if PAUSA_EVENTO is None:
+        PAUSA_EVENTO = threading.Event()
+        PAUSA_EVENTO.set()
+    if DETENER_EVENTO is None:
+        DETENER_EVENTO = threading.Event()
+    ANALIZADOR = AnalizadorFallos()
+    log.info(f"[APRENDIZAJE] Ajustes al inicio: {ANALIZADOR.resumen()}")
+
+    EXCEL_PATH = Path(excel_path)
+    ACUERDO_COBERTURA_TEXTO = acuerdo_texto
+    PAUSA_ENTRE_PRODUCTOS = pausa_entre_productos
+    REPORTE_PATH = nueva_ruta_reporte()
+
+    log.info("Iniciando Peru Compras Bot en modo cobertura...")
+    log.info(f"Archivo Excel seleccionado: {EXCEL_PATH}")
+    log.info(f"Filtro acuerdo: {ACUERDO_COBERTURA_TEXTO}")
+
+    df, resumen_excel = cargar_coberturas_excel(EXCEL_PATH)
+    log.info(f"Regiones válidas cargadas: {len(df)}")
+    for advertencia in resumen_excel.warnings:
+        log.warning(advertencia)
+
+    chrome_options = Options()
+    chrome_options.add_argument("--start-maximized")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    try:
+        paso1_login(driver)
+        paso2_navegacion_cobertura(driver)
+        paso3_filtros_cobertura(driver)
+        paso4_actualizar_cobertura(driver, df)
+        generar_reporte_cobertura_excel(acuerdo_texto)
         if ANALIZADOR:
             ANALIZADOR.guardar()
         return REPORTE_PATH
