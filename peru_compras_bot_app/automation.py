@@ -52,6 +52,7 @@ BASE_URL = "https://www.catalogos.perucompras.gob.pe"
 LOGIN_URL = f"{BASE_URL}/AccesoGeneral"
 MEJORA_URL = f"{BASE_URL}/MejoraBasica"
 MEJORA_COBERTURA_URL = f"{BASE_URL}/MejoraCobertura"
+MEJORA_PLAZO_URL = f"{BASE_URL}/MejoraPlazo/IndexMejora"
 
 # Textos visibles de los selectores de filtro
 ACUERDO_TEXTO = "EXT-CE-2022-5 COMPUTADORAS DE ESCRITORIO"
@@ -63,6 +64,7 @@ ACUERDO_COBERTURA_TEXTO = "EXT-CE-2022-5 COMPUTADORAS DE ESCRITORIO"
 WAIT_NORMAL = 15
 WAIT_LARGO = 30
 WAIT_CORTO = 5
+WAIT_BUSQUEDA_PLAZO = 900
 PAUSA_ENTRE_PRODUCTOS = 2  # Pausa entre iteraciones para no sobrecargar
 
 # Estado para modo GUI
@@ -146,6 +148,37 @@ class CoberturaValidationSummary:
     @property
     def total_problem_rows(self) -> int:
         return self.missing_region_rows + self.invalid_deadline_rows
+
+    @property
+    def is_ready(self) -> bool:
+        return not self.blocking_issues and self.valid_rows > 0
+
+    @property
+    def status_label(self) -> str:
+        if self.is_ready:
+            return "Listo para ejecutar"
+        if self.blocking_issues:
+            return "Requiere correcciones"
+        return "Pendiente de revisión"
+
+
+@dataclass
+class PlazoValidationSummary:
+    file_path: Path
+    total_rows: int = 0
+    valid_rows: int = 0
+    empty_rows: int = 0
+    missing_part_rows: int = 0
+    invalid_deadline_rows: int = 0
+    duplicate_parts: int = 0
+    missing_columns: tuple[str, ...] = ()
+    warnings: list[str] = field(default_factory=list)
+    blocking_issues: list[str] = field(default_factory=list)
+    issue_examples: list[str] = field(default_factory=list)
+
+    @property
+    def total_problem_rows(self) -> int:
+        return self.missing_part_rows + self.invalid_deadline_rows
 
     @property
     def is_ready(self) -> bool:
@@ -453,6 +486,99 @@ def cargar_coberturas_excel(excel_path: Path) -> tuple[pd.DataFrame, CoberturaVa
     return df_limpio, resumen
 
 
+def analizar_excel_plazos(excel_path: Path) -> tuple[PlazoValidationSummary, pd.DataFrame]:
+    ruta = Path(excel_path)
+    resumen = PlazoValidationSummary(file_path=ruta)
+
+    if not ruta.exists():
+        resumen.blocking_issues.append("No se encontró el archivo Excel seleccionado.")
+        return resumen, pd.DataFrame(columns=["Parte", "Plazo"])
+
+    try:
+        raw_df = pd.read_excel(ruta)
+    except Exception as exc:
+        resumen.blocking_issues.append(f"No se pudo abrir el archivo: {exc}")
+        return resumen, pd.DataFrame(columns=["Parte", "Plazo"])
+
+    resumen.total_rows = len(raw_df)
+    columnas_faltantes = tuple(
+        columna for columna in ("Parte", "Plazo") if columna not in raw_df.columns
+    )
+    if columnas_faltantes:
+        resumen.missing_columns = columnas_faltantes
+        resumen.blocking_issues.append(
+            "Faltan columnas obligatorias: " + ", ".join(columnas_faltantes)
+        )
+        return resumen, pd.DataFrame(columns=["Parte", "Plazo"])
+
+    registros_validos = []
+    for fila_excel, (_, fila) in enumerate(raw_df.iterrows(), start=2):
+        parte = _normalizar_parte(fila.get("Parte"))
+        plazo_raw = fila.get("Plazo")
+
+        if not parte and (pd.isna(plazo_raw) or str(plazo_raw).strip() == ""):
+            resumen.empty_rows += 1
+            continue
+
+        if not parte:
+            resumen.missing_part_rows += 1
+            if len(resumen.issue_examples) < 4:
+                resumen.issue_examples.append(f"Fila {fila_excel}: falta el número de parte.")
+            continue
+
+        try:
+            plazo = _normalizar_plazo(plazo_raw)
+        except ValueError as exc:
+            resumen.invalid_deadline_rows += 1
+            if len(resumen.issue_examples) < 4:
+                resumen.issue_examples.append(
+                    f"Fila {fila_excel} ({parte}): plazo {exc}."
+                )
+            continue
+
+        registros_validos.append({"Parte": parte, "Plazo": plazo})
+
+    df_limpio = pd.DataFrame(registros_validos, columns=["Parte", "Plazo"])
+    resumen.valid_rows = len(df_limpio)
+
+    if not df_limpio.empty:
+        duplicados = int(df_limpio["Parte"].duplicated(keep=False).sum())
+        resumen.duplicate_parts = duplicados
+        if duplicados:
+            resumen.warnings.append(
+                f"Hay {duplicados} fila(s) con números de parte repetidos. Se procesarán en el orden del archivo."
+            )
+
+    if resumen.missing_part_rows:
+        resumen.blocking_issues.append(
+            f"Hay {resumen.missing_part_rows} fila(s) sin número de parte."
+        )
+    if resumen.invalid_deadline_rows:
+        resumen.blocking_issues.append(
+            f"Hay {resumen.invalid_deadline_rows} fila(s) con plazo inválido."
+        )
+    if resumen.valid_rows == 0 and not resumen.blocking_issues:
+        resumen.blocking_issues.append("No hay productos válidos para procesar.")
+    if resumen.empty_rows:
+        resumen.warnings.append(
+            f"Se ignorarán {resumen.empty_rows} fila(s) vacías en el Excel."
+        )
+
+    return resumen, df_limpio
+
+
+def cargar_plazos_excel(excel_path: Path) -> tuple[pd.DataFrame, PlazoValidationSummary]:
+    resumen, df_limpio = analizar_excel_plazos(excel_path)
+    if resumen.blocking_issues:
+        detalle = "\n".join(f"- {item}" for item in resumen.blocking_issues)
+        ejemplos = "\n".join(f"- {item}" for item in resumen.issue_examples)
+        mensaje = ["El archivo Excel de plazos necesita correcciones antes de continuar:", detalle]
+        if ejemplos:
+            mensaje.extend(["", "Ejemplos detectados:", ejemplos])
+        raise ValueError("\n".join(mensaje))
+    return df_limpio, resumen
+
+
 def nueva_ruta_reporte():
     return BASE_DIR / f"reporte_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
 
@@ -699,6 +825,60 @@ def generar_plantilla_cobertura_excel(destino: Path):
         celda.fill = fill("FFFFFF")
         celda.border = borde
         celda.alignment = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
+
+    wb.save(destino)
+
+
+def generar_plantilla_plazo_excel(destino: Path):
+    wb = _OxlWorkbook()
+
+    def fill(color):
+        return _OxlFill("solid", fgColor=color)
+
+    def font(bold=False, size=10, color="000000", italic=False):
+        return _OxlFont(name="Calibri", bold=bold, size=size, color=color, italic=italic)
+
+    borde = _OxlBorder(
+        left=_OxlSide(style="thin", color="BFBFBF"),
+        right=_OxlSide(style="thin", color="BFBFBF"),
+        top=_OxlSide(style="thin", color="BFBFBF"),
+        bottom=_OxlSide(style="thin", color="BFBFBF"),
+    )
+    ac = _OxlAlignment(horizontal="center", vertical="center", wrap_text=False)
+
+    ws = wb.active
+    ws.title = "Plazos"
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 16
+
+    ws.merge_cells("A1:B1")
+    ws["A1"].value = "Plantilla de Plazo de Entrega — Peru Compras Bot"
+    ws["A1"].font = font(bold=True, size=13, color="FFFFFF")
+    ws["A1"].fill = fill("00205B")
+    ws["A1"].alignment = ac
+
+    ws.merge_cells("A2:B2")
+    ws["A2"].value = "Usa esta plantilla para el modo individual. Completa Parte y Plazo desde la fila 4."
+    ws["A2"].font = font(italic=True, size=9, color="595959")
+    ws["A2"].alignment = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
+
+    for col, txt in enumerate(("Parte", "Plazo"), start=1):
+        celda = ws.cell(row=4, column=col, value=txt)
+        celda.fill = fill("1F4E79")
+        celda.font = font(bold=True, size=11, color="FFFFFF")
+        celda.border = borde
+        celda.alignment = ac
+
+    ejemplos = [("LC49G95TSSLXPE", 5), ("SCREEN002GCS27SQUARE", 7), ("1C4Z6AA#ABA", 10)]
+    for fila, (parte, plazo) in enumerate(ejemplos, start=5):
+        color = "EBF3FB" if fila % 2 == 0 else "FFFFFF"
+        for col, value in enumerate((parte, plazo), start=1):
+            celda = ws.cell(row=fila, column=col, value=value)
+            celda.fill = fill(color)
+            celda.font = font(size=10, color="595959")
+            celda.border = borde
+            celda.alignment = ac if col == 2 else _OxlAlignment(horizontal="left", vertical="center")
 
     wb.save(destino)
 
@@ -1032,6 +1212,104 @@ def generar_reporte_cobertura_excel(acuerdo_texto: str = ""):
     return REPORTE_PATH
 
 
+def generar_reporte_plazo_excel(titulo_contexto: str = ""):
+    wb = _OxlWorkbook()
+    total = len(RESULTADOS)
+    exitos = sum(1 for r in RESULTADOS if r.get("Estado") == "EXITO")
+    fallos = total - exitos
+
+    def fill(color):
+        return _OxlFill("solid", fgColor=color)
+
+    def font(bold=False, size=10, color="000000"):
+        return _OxlFont(name="Calibri", bold=bold, size=size, color=color)
+
+    borde = _OxlBorder(
+        left=_OxlSide(style="thin", color="BFBFBF"),
+        right=_OxlSide(style="thin", color="BFBFBF"),
+        top=_OxlSide(style="thin", color="BFBFBF"),
+        bottom=_OxlSide(style="thin", color="BFBFBF"),
+    )
+    ac = _OxlAlignment(horizontal="center", vertical="center", wrap_text=False)
+    al = _OxlAlignment(horizontal="left", vertical="center", wrap_text=True)
+
+    def celda(ws, row, col, value, fll=None, fnt=None, aln=None):
+        cell = ws.cell(row=row, column=col, value=value)
+        if fll:
+            cell.fill = fll
+        if fnt:
+            cell.font = fnt
+        cell.border = borde
+        cell.alignment = aln or ac
+        return cell
+
+    ws_res = wb.active
+    ws_res.title = "Resumen"
+    ws_res.sheet_view.showGridLines = False
+    ws_res.column_dimensions["A"].width = 34
+    ws_res.column_dimensions["B"].width = 14
+    ws_res.column_dimensions["C"].width = 16
+
+    ws_res.merge_cells("A1:C1")
+    ws_res["A1"].value = "PERU COMPRAS BOT — Reporte de Plazo de Entrega"
+    ws_res["A1"].font = font(bold=True, size=14, color="FFFFFF")
+    ws_res["A1"].fill = fill("00205B")
+    ws_res["A1"].alignment = ac
+
+    ws_res.merge_cells("A2:C2")
+    ws_res["A2"].value = f"Generado el {datetime.now():%d/%m/%Y a las %H:%M:%S}"
+    ws_res["A2"].alignment = ac
+
+    ws_res.merge_cells("A3:C3")
+    ws_res["A3"].value = titulo_contexto or "Actualización de plazos"
+    ws_res["A3"].alignment = al
+
+    for col, txt in enumerate(("Resultado", "Cantidad", "Porcentaje"), start=1):
+        celda(ws_res, 5, col, txt, fill("1F4E79"), font(bold=True, size=11, color="FFFFFF"))
+
+    pct_e = f"{exitos / total * 100:.1f}%" if total else "0.0%"
+    pct_f = f"{fallos / total * 100:.1f}%" if total else "0.0%"
+    for col, val in enumerate(("Actualizados", exitos, pct_e), start=1):
+        celda(ws_res, 6, col, val, fill("C6EFCE"), font(bold=True, color="375623"))
+    for col, val in enumerate(("Con error", fallos, pct_f), start=1):
+        celda(ws_res, 7, col, val, fill("FFC7CE"), font(bold=True, color="9C0006"))
+    for col, val in enumerate(("Total", total, "100%"), start=1):
+        celda(ws_res, 8, col, val, fill("D9E1F2"), font(bold=True))
+
+    ws_det = wb.create_sheet("Detalle")
+    ws_det.sheet_view.showGridLines = False
+    headers = ["#", "Modo", "Parte", "Región", "Provincia", "Plazo", "Estado", "Tipo de Fallo", "Descripción", "Duración (seg)"]
+    for col, header in enumerate(headers, start=1):
+        celda(ws_det, 2, col, header, fill("2E75B6"), font(bold=True, size=10, color="FFFFFF"))
+
+    for i, resultado in enumerate(RESULTADOS, start=1):
+        fila = i + 2
+        ok = resultado.get("Estado") == "EXITO"
+        color = fill("C6EFCE") if ok else fill("FFC7CE")
+        color_texto = "375623" if ok else "9C0006"
+        valores = [
+            i,
+            resultado.get("Modo", ""),
+            resultado.get("Parte", resultado.get("Descripción breve", "")),
+            resultado.get("Region", ""),
+            resultado.get("Provincia", ""),
+            resultado.get("Plazo", ""),
+            resultado.get("Estado", ""),
+            resultado.get("Tipo de Fallo", "—") or "—",
+            resultado.get("Descripción", ""),
+            resultado.get("Duración (seg)", 0),
+        ]
+        for col, valor in enumerate(valores, start=1):
+            celda(ws_det, fila, col, valor, color, font(bold=True, size=9, color=color_texto), al if col in (2, 3, 4, 5, 8, 9) else ac)
+
+    for letra, ancho in {"A": 5, "B": 14, "C": 26, "D": 18, "E": 18, "F": 10, "G": 12, "H": 24, "I": 48, "J": 14}.items():
+        ws_det.column_dimensions[letra].width = ancho
+
+    wb.save(REPORTE_PATH)
+    log.info(f"Reporte Excel generado: {REPORTE_PATH}")
+    return REPORTE_PATH
+
+
 # ---------------------------------------------------------------------------
 # HELPERS DE SELENIUM
 # ---------------------------------------------------------------------------
@@ -1272,6 +1550,283 @@ def paso2_navegacion_cobertura(driver):
         log.warning("No se pudo navegar por menú. Se reintenta URL directa...")
         driver.get(MEJORA_COBERTURA_URL)
         time.sleep(3)
+
+
+def paso2_navegacion_plazo(driver):
+    """Navega a la sección de plazo de entrega máximo."""
+    log.info("=" * 60)
+    log.info("PASO 2: Navegación a Plazo de entrega máximo")
+    log.info("=" * 60)
+
+    driver.back()
+    time.sleep(2)
+    driver.get(BASE_URL)
+    time.sleep(2)
+    log.info("Retroceso ejecutado para desbloquear menú.")
+
+    driver.get(MEJORA_PLAZO_URL)
+    time.sleep(3)
+    if "MejoraPlazo" in driver.current_url:
+        log.info(f"Navegación exitosa a: {driver.current_url}")
+        return
+
+    try:
+        submenu = esperar_clickeable(
+            driver,
+            By.XPATH,
+            "//a[contains(@href,'MejoraPlazo/IndexMejora')]"
+            "|//a[contains(text(),'Plazo de entrega máximo')]"
+            "|//a[contains(text(),'Plazo de entrega maximo')]",
+        )
+        submenu.click()
+        time.sleep(2)
+        log.info(f"Navegación por menú completada. URL: {driver.current_url}")
+    except TimeoutException:
+        log.warning("No se pudo navegar por menú. Se reintenta URL directa...")
+        driver.get(MEJORA_PLAZO_URL)
+        time.sleep(3)
+
+
+def _seleccionar_y_disparar(driver, select_id: str, texto: str, timeout=WAIT_LARGO, flexible: bool = False):
+    select_obj = esperar_opciones_select(driver, select_id, timeout)
+    if flexible:
+        seleccionar_por_texto_flexible(select_obj, texto)
+    else:
+        seleccionar_por_texto_parcial(select_obj, texto)
+    driver.execute_script(
+        "arguments[0].dispatchEvent(new Event('change', {bubbles: true}));",
+        select_obj._el,
+    )
+    return select_obj
+
+
+def _esperar_filas_plazo(driver, timeout=WAIT_BUSQUEDA_PLAZO):
+    return WebDriverWait(driver, timeout).until(
+        lambda drv: drv.find_elements(By.CSS_SELECTOR, "#TablaDatos #tbData tr.FilaDatos")
+    )
+
+
+def buscar_plazo_entrega(
+    driver,
+    acuerdo_texto: str,
+    catalogo_texto: str,
+    categoria_texto: str,
+    region_texto: str,
+    provincia_texto: str,
+    descripcion: str = "",
+):
+    log.info("=" * 60)
+    log.info("PASO 3: Configuración de filtros de plazo")
+    log.info("=" * 60)
+
+    _seleccionar_y_disparar(driver, "cboAcuerdo", acuerdo_texto, WAIT_LARGO)
+    _sleep_controlado(2)
+    _seleccionar_y_disparar(driver, "cboCatalogo", catalogo_texto, WAIT_LARGO)
+    _sleep_controlado(2)
+    _seleccionar_y_disparar(driver, "cboCategoria", categoria_texto, WAIT_LARGO)
+    _sleep_controlado(2)
+    _seleccionar_y_disparar(driver, "cboRegion", region_texto, WAIT_LARGO, flexible=True)
+    _sleep_controlado(2)
+    _seleccionar_y_disparar(driver, "cboProvincia", provincia_texto, WAIT_LARGO, flexible=True)
+    _sleep_controlado(1)
+
+    campo_descripcion = esperar_elemento(driver, By.ID, "txtDescripcion", WAIT_NORMAL)
+    campo_descripcion.clear()
+    if descripcion:
+        campo_descripcion.send_keys(descripcion)
+
+    boton_buscar = esperar_clickeable(driver, By.ID, "btnBuscar", WAIT_NORMAL)
+    boton_buscar.click()
+    log.info("Búsqueda de plazo lanzada.")
+
+    filas = _esperar_filas_plazo(driver, WAIT_BUSQUEDA_PLAZO)
+    log.info(f"Resultados cargados: {len(filas)} producto(s)")
+    return filas
+
+
+def _establecer_valor_input(driver, elemento, valor: int):
+    driver.execute_script(
+        "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('blur', {bubbles: true}));",
+        elemento,
+        str(valor),
+    )
+
+
+def aplicar_plazo_a_todo_el_bloque(driver, plazo: int) -> int:
+    filas = _esperar_filas_plazo(driver, WAIT_LARGO)
+    if not filas:
+        raise TimeoutException("No se encontraron productos para aplicar el plazo por bloque")
+
+    primer_input = filas[0].find_element(By.CSS_SELECTOR, "input.PlazoEntrega")
+    _establecer_valor_input(driver, primer_input, plazo)
+    boton_replicar = filas[0].find_element(By.XPATH, ".//input[@type='button' and contains(@value,'Aplicar a todos')]")
+    boton_replicar.click()
+    _sleep_controlado(1)
+    log.info(f"Plazo {plazo} aplicado al bloque completo ({len(filas)} productos visibles)")
+    return len(filas)
+
+
+def aplicar_plazo_a_resultados_visibles(driver, plazo: int) -> int:
+    filas = _esperar_filas_plazo(driver, WAIT_LARGO)
+    if not filas:
+        raise TimeoutException("No se encontraron productos para aplicar el plazo")
+
+    inputs = driver.find_elements(By.CSS_SELECTOR, "#TablaDatos input.PlazoEntrega")
+    for input_plazo in inputs:
+        _establecer_valor_input(driver, input_plazo, plazo)
+    _sleep_controlado(0.8)
+    log.info(f"Plazo {plazo} colocado en {len(inputs)} producto(s) visible(s)")
+    return len(inputs)
+
+
+def enviar_datos_plazo(driver):
+    boton_enviar = esperar_clickeable(driver, By.ID, "btnEnviarDatos", WAIT_NORMAL)
+    boton_enviar.click()
+    _sleep_controlado(1)
+
+    try:
+        aceptar_alerta(driver, timeout=WAIT_CORTO)
+    except Exception:
+        pass
+    manejar_confirmacion_sweetalert(driver, timeout=WAIT_CORTO)
+    _sleep_controlado(2)
+    log.info("Cambios de plazo enviados al portal")
+
+
+def limpiar_busqueda_plazo(driver):
+    try:
+        boton_limpiar = esperar_clickeable(driver, By.ID, "btnLimpiarDatos", WAIT_CORTO)
+        boton_limpiar.click()
+        _sleep_controlado(1)
+    except Exception:
+        try:
+            campo = driver.find_element(By.ID, "txtDescripcion")
+            campo.clear()
+        except Exception:
+            pass
+
+
+def recuperar_estado_plazo(driver):
+    try:
+        driver.switch_to.alert.accept()
+    except NoAlertPresentException:
+        pass
+    limpiar_busqueda_plazo(driver)
+
+
+def paso4_actualizar_plazo_bloque(
+    driver,
+    acuerdo_texto: str,
+    catalogo_texto: str,
+    categoria_texto: str,
+    region_texto: str,
+    provincia_texto: str,
+    plazo: int,
+):
+    log.info("=" * 60)
+    log.info("PASO 4: Actualización de plazo por bloque")
+    log.info("=" * 60)
+
+    t_inicio = time.time()
+    filas = buscar_plazo_entrega(
+        driver,
+        acuerdo_texto=acuerdo_texto,
+        catalogo_texto=catalogo_texto,
+        categoria_texto=categoria_texto,
+        region_texto=region_texto,
+        provincia_texto=provincia_texto,
+    )
+    total_productos = aplicar_plazo_a_todo_el_bloque(driver, plazo)
+    enviar_datos_plazo(driver)
+    RESULTADOS.append({
+        "Modo": "BLOQUE",
+        "Descripción breve": f"{catalogo_texto} / {categoria_texto}",
+        "Region": region_texto,
+        "Provincia": provincia_texto,
+        "Plazo": plazo,
+        "Estado": "EXITO",
+        "Tipo de Fallo": "",
+        "Descripción": f"Plazo aplicado a {total_productos} producto(s) del bloque.",
+        "Duración (seg)": round(time.time() - t_inicio, 1),
+    })
+    log.info(f"Bloque actualizado correctamente. Productos visibles: {len(filas)}")
+
+
+def paso4_actualizar_plazo_individual(
+    driver,
+    df: pd.DataFrame,
+    acuerdo_texto: str,
+    catalogo_texto: str,
+    categoria_texto: str,
+    region_texto: str,
+    provincia_texto: str,
+):
+    log.info("=" * 60)
+    log.info(f"PASO 4: Actualización individual de plazo ({len(df)} producto(s))")
+    log.info("=" * 60)
+
+    total = len(df)
+    for idx, fila in df.iterrows():
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            log.warning("Detención solicitada. Se cierra el procesamiento antes del siguiente producto.")
+            break
+
+        _esperar_controles_ejecucion()
+        parte = str(fila["Parte"]).strip()
+        plazo = int(fila["Plazo"])
+        log.info(f"\n--- Producto {int(idx) + 1}/{total}: Parte={parte}, Plazo={plazo} ---")
+
+        t_inicio = time.time()
+        try:
+            buscar_plazo_entrega(
+                driver,
+                acuerdo_texto=acuerdo_texto,
+                catalogo_texto=catalogo_texto,
+                categoria_texto=categoria_texto,
+                region_texto=region_texto,
+                provincia_texto=provincia_texto,
+                descripcion=parte,
+            )
+            actualizados = aplicar_plazo_a_resultados_visibles(driver, plazo)
+            enviar_datos_plazo(driver)
+            RESULTADOS.append({
+                "Modo": "INDIVIDUAL",
+                "Parte": parte,
+                "Region": region_texto,
+                "Provincia": provincia_texto,
+                "Plazo": plazo,
+                "Estado": "EXITO",
+                "Tipo de Fallo": "",
+                "Descripción": f"Plazo aplicado en {actualizados} coincidencia(s) visible(s).",
+                "Duración (seg)": round(time.time() - t_inicio, 1),
+            })
+            log.info(f"  [OK] {parte} -> plazo actualizado")
+        except Exception as exc:
+            tipo_fallo = clasificar_error(str(exc))
+            if ANALIZADOR:
+                ANALIZADOR.registrar(tipo_fallo)
+            RESULTADOS.append({
+                "Modo": "INDIVIDUAL",
+                "Parte": parte,
+                "Region": region_texto,
+                "Provincia": provincia_texto,
+                "Plazo": plazo,
+                "Estado": "FALLO",
+                "Tipo de Fallo": tipo_fallo,
+                "Descripción": str(exc),
+                "Duración (seg)": round(time.time() - t_inicio, 1),
+            })
+            log.error(f"  Error procesando plazo para {parte}: {exc}")
+            try:
+                recuperar_estado_plazo(driver)
+            except Exception:
+                log.warning("  No se pudo recuperar estado en plazo. Recargando página...")
+                driver.get(MEJORA_PLAZO_URL)
+                _sleep_controlado(3)
+
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            break
+        _sleep_controlado(PAUSA_ENTRE_PRODUCTOS)
 
 
 def paso3_filtros_cobertura(driver):
@@ -2006,6 +2561,88 @@ def ejecutar_bot_cobertura(
         paso3_filtros_cobertura(driver)
         paso4_actualizar_cobertura(driver, df)
         generar_reporte_cobertura_excel(acuerdo_texto)
+        if ANALIZADOR:
+            ANALIZADOR.guardar()
+        return REPORTE_PATH
+    finally:
+        driver.quit()
+        log.info("Navegador cerrado. Fin del script.")
+
+
+def ejecutar_bot_plazo(
+    acuerdo_texto: str,
+    catalogo_texto: str,
+    categoria_texto: str,
+    region_texto: str,
+    provincia_texto: str,
+    modo_carga: str,
+    pausa_entre_productos: int = 2,
+    plazo_general: int | None = None,
+    excel_path: Path | None = None,
+):
+    global EXCEL_PATH, PAUSA_ENTRE_PRODUCTOS, REPORTE_PATH, RESULTADOS
+    global PAUSA_EVENTO, DETENER_EVENTO, ANALIZADOR
+    RESULTADOS = []
+    if PAUSA_EVENTO is None:
+        PAUSA_EVENTO = threading.Event()
+        PAUSA_EVENTO.set()
+    if DETENER_EVENTO is None:
+        DETENER_EVENTO = threading.Event()
+    ANALIZADOR = AnalizadorFallos()
+    log.info(f"[APRENDIZAJE] Ajustes al inicio: {ANALIZADOR.resumen()}")
+
+    PAUSA_ENTRE_PRODUCTOS = pausa_entre_productos
+    REPORTE_PATH = nueva_ruta_reporte()
+    if excel_path:
+        EXCEL_PATH = Path(excel_path)
+
+    if modo_carga == "individual":
+        if not excel_path:
+            raise ValueError("Debes seleccionar un Excel para el modo individual de plazo.")
+        df, resumen_excel = cargar_plazos_excel(Path(excel_path))
+        log.info(f"Productos válidos cargados para plazo: {len(df)}")
+        for advertencia in resumen_excel.warnings:
+            log.warning(advertencia)
+    else:
+        if plazo_general is None:
+            raise ValueError("Debes indicar un plazo general para el modo por bloque.")
+        _normalizar_plazo(plazo_general)
+        df = None
+
+    chrome_options = Options()
+    chrome_options.add_argument("--start-maximized")
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
+    try:
+        paso1_login(driver)
+        paso2_navegacion_plazo(driver)
+        if modo_carga == "bloque":
+            paso4_actualizar_plazo_bloque(
+                driver,
+                acuerdo_texto=acuerdo_texto,
+                catalogo_texto=catalogo_texto,
+                categoria_texto=categoria_texto,
+                region_texto=region_texto,
+                provincia_texto=provincia_texto,
+                plazo=int(plazo_general),
+            )
+        else:
+            paso4_actualizar_plazo_individual(
+                driver,
+                df=df,
+                acuerdo_texto=acuerdo_texto,
+                catalogo_texto=catalogo_texto,
+                categoria_texto=categoria_texto,
+                region_texto=region_texto,
+                provincia_texto=provincia_texto,
+            )
+        contexto = f"{catalogo_texto} | {categoria_texto} | {region_texto} | {provincia_texto}"
+        generar_reporte_plazo_excel(contexto)
         if ANALIZADOR:
             ANALIZADOR.guardar()
         return REPORTE_PATH

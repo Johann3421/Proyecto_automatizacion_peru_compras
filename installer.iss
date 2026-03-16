@@ -2,7 +2,7 @@
 ; Requires Inno Setup 6+
 
 #define MyAppName "Peru Compras Bot"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.1"
 #define MyAppPublisher "Peru Compras"
 #define MyAppExeName "peru_compras_bot.exe"
 
@@ -15,7 +15,7 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=installer_output
-OutputBaseFilename=PeruComprasBot_Setup
+OutputBaseFilename=PeruComprasBot_Setup_1_3_1
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
