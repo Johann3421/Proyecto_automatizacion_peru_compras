@@ -31,18 +31,42 @@ class TextQueueLogHandler(logging.Handler):
 
 class _Tooltip:
     """Tooltip sencillo que aparece al pasar el mouse sobre un widget."""
+    _instances: list = []  # registro global para cerrar todos antes de abrir uno nuevo
+
     def __init__(self, widget, text):
         self.widget = widget
         self.text = text
         self._tip = None
-        widget.bind("<Enter>", self._show)
-        widget.bind("<Leave>", self._hide)
-        widget.bind("<ButtonPress>", self._hide)
+        self._job = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+        widget.bind("<<ComboboxSelected>>", self._hide, add="+")
+        widget.bind("<FocusOut>", self._hide, add="+")
+        _Tooltip._instances.append(self)
+
+    def _schedule(self, _event=None):
+        self._cancel_job()
+        self._job = self.widget.after(450, self._show)
+
+    def _cancel_job(self):
+        if self._job is not None:
+            try:
+                self.widget.after_cancel(self._job)
+            except Exception:
+                pass
+            self._job = None
 
     def _show(self, _event=None):
-        x, y, _, cy = self.widget.bbox("insert") if hasattr(self.widget, "bbox") else (0, 0, 0, 0)
-        x += self.widget.winfo_rootx() + 24
-        y += self.widget.winfo_rooty() + cy + 20
+        self._job = None
+        # cerrar cualquier otro tooltip activo antes de mostrar este
+        for tt in _Tooltip._instances:
+            if tt is not self and tt._tip is not None:
+                tt._do_hide()
+        if self._tip is not None:
+            return  # ya está visible
+        x = self.widget.winfo_rootx() + 24
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
         self._tip = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
@@ -55,10 +79,17 @@ class _Tooltip:
         )
         lbl.pack()
 
-    def _hide(self, _event=None):
+    def _do_hide(self):
+        self._cancel_job()
         if self._tip:
-            self._tip.destroy()
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
             self._tip = None
+
+    def _hide(self, _event=None):
+        self._do_hide()
 
 
 class PeruComprasGUI:
@@ -103,6 +134,8 @@ class PeruComprasGUI:
         self._procesados = 0
         self.validation_summary = None
         self._portal_snapshot = {"acuerdos": 0, "catalogos": 0, "categorias": 0}
+        # Caché completa: {catalogo_nombre: [categoria1, ...]} para poblar la cascada sin re-importar
+        self._catalogo_categorias_map: dict = {}
         self._progress_file = bot.BASE_DIR / "progreso_guardado.json"
 
         self.operation_var = tk.StringVar(value=self.MODO_STOCK)
@@ -135,6 +168,12 @@ class PeruComprasGUI:
         self._configurar_logging_gui()
         self._tick_logs()
         self._analizar_excel_actual(silencioso=True)
+        # Pre-rellenar combos con valores por defecto para que los campos no estén en blanco al arrancar
+        self._actualizar_combos(
+            [bot.ACUERDO_TEXTO],
+            [bot.CATALOGO_TEXTO],
+            [bot.CATEGORIA_TEXTO],
+        )
         self._actualizar_resumen_seleccion()
 
     # ------------------------------------------------------------------
@@ -1680,15 +1719,30 @@ class PeruComprasGUI:
         self._set_banner("Acuerdo cambiado. Si necesitas sincronizar catálogos y categorías, importa opciones del portal.")
 
     def _on_catalogo_changed(self, event=None):
-        self.combo_categoria["values"] = []
-        self.categoria_var.set("")
+        # Intentar poblar categorías desde la caché sin requerir re-importar
+        cat_sel = self.catalogo_var.get().strip()
+        cached = self._catalogo_categorias_map.get(cat_sel, [])
+        if not cached:
+            # Buscar coincidencia parcial por si el texto no es exacto
+            for k, v in self._catalogo_categorias_map.items():
+                if cat_sel and (cat_sel in k or k in cat_sel):
+                    cached = v
+                    break
+        self.combo_categoria["values"] = cached
+        if cached:
+            self.categoria_var.set(cached[0])
+        else:
+            self.categoria_var.set("")
         if self._es_modo_plazo():
             self.combo_region["values"] = []
             self.region_var.set("")
             self.combo_provincia["values"] = []
             self.provincia_var.set("")
         self._actualizar_resumen_seleccion()
-        self._set_banner("Catálogo cambiado. Si necesitas sincronizar categorías, importa opciones del portal.")
+        if cached:
+            self._set_banner(f"Catálogo '{cat_sel}': {len(cached)} categorías disponibles.")
+        else:
+            self._set_banner("Catálogo cambiado. Si necesitas sincronizar categorías, importa opciones del portal.")
 
     def _on_region_changed(self, event=None):
         self.combo_provincia["values"] = []
@@ -1722,8 +1776,7 @@ class PeruComprasGUI:
             chrome_opts.add_argument("--disable-blink-features=AutomationControlled")
             chrome_opts.add_experimental_option("excludeSwitches", ["enable-automation"])
             chrome_opts.add_experimental_option("useAutomationExtension", False)
-            service = bot.Service(bot.ChromeDriverManager().install())
-            driver = bot.webdriver.Chrome(service=service, options=chrome_opts)
+            driver = bot.webdriver.Chrome(options=chrome_opts)
 
             bot.paso1_login(driver)
             if self._es_modo_cobertura():
@@ -1741,10 +1794,14 @@ class PeruComprasGUI:
             log.info(f"Opciones Acuerdo ({len(acuerdo_opts)}): {acuerdo_opts}")
 
             catalogo_opts = []
+            catalogo_categorias_map = {}  # {catalogo: [categorias...]}
             categoria_opts = []
             region_opts = []
             provincia_opts = []
             acuerdo_actual = self.acuerdo_var.get().strip()
+            catalogo_actual = self.catalogo_var.get().strip()
+
+            # ── Paso 1: seleccionar acuerdo y obtener lista de catálogos ──────────
             if acuerdo_opts and not self._es_modo_cobertura():
                 try:
                     sel_a = bot.esperar_opciones_select(driver, acuerdo_select_id, bot.WAIT_LARGO)
@@ -1763,25 +1820,38 @@ class PeruComprasGUI:
                 except Exception as e:
                     log.warning(f"No se pudo cargar catálogos: {e}")
 
-            catalogo_actual = self.catalogo_var.get().strip()
-            if catalogo_opts and not self._es_modo_cobertura():
+            # ── Paso 2: iterar TODOS los catálogos para cargar sus categorías ─────
+            for idx, cat_nombre in enumerate(catalogo_opts):
+                self.root.after(0, lambda n=cat_nombre, i=idx, t=len(catalogo_opts): self._set_banner(
+                    f"Importando catálogo {i+1}/{t}: '{n}'...",
+                    self.C_INFO_BG, self.C_INFO_FG,
+                ))
                 try:
                     sel_c = bot.esperar_opciones_select(driver, catalogo_select_id, bot.WAIT_LARGO)
-                    texto_c = catalogo_actual if catalogo_actual else catalogo_opts[0]
                     if self._es_modo_plazo():
-                        bot.seleccionar_por_texto_flexible(sel_c, texto_c)
+                        bot.seleccionar_por_texto_flexible(sel_c, cat_nombre)
                         driver.execute_script(
                             "arguments[0].dispatchEvent(new Event('change', {bubbles: true}));",
                             sel_c._el,
                         )
                     else:
-                        bot.seleccionar_por_texto_parcial(sel_c, texto_c)
+                        bot.seleccionar_por_texto_parcial(sel_c, cat_nombre)
                     time.sleep(2)
-                    categoria_opts = bot.leer_opciones_select(driver, categoria_select_id)
-                    log.info(f"Opciones Categoría ({len(categoria_opts)}): {categoria_opts}")
+                    cats = bot.leer_opciones_select(driver, categoria_select_id)
+                    catalogo_categorias_map[cat_nombre] = cats
+                    log.info(f"Categorías de '{cat_nombre}' ({len(cats)}): {cats}")
                 except Exception as e:
-                    log.warning(f"No se pudo cargar categorías: {e}")
+                    log.warning(f"No se pudo cargar categorías de '{cat_nombre}': {e}")
+                    catalogo_categorias_map[cat_nombre] = []
 
+            # ── Calcular categoria_opts para el catálogo actualmente seleccionado ─
+            if catalogo_actual and catalogo_actual in catalogo_categorias_map:
+                categoria_opts = catalogo_categorias_map[catalogo_actual]
+            elif catalogo_opts:
+                primer_cat = catalogo_opts[0]
+                categoria_opts = catalogo_categorias_map.get(primer_cat, [])
+
+            # ── Paso 3 (plazo): cargar regiones y provincias para la categoría activa ──
             if self._es_modo_plazo() and categoria_opts:
                 try:
                     sel_cat = bot.esperar_opciones_select(driver, categoria_select_id, bot.WAIT_LARGO)
@@ -1812,7 +1882,10 @@ class PeruComprasGUI:
                 except Exception as e:
                     log.warning(f"No se pudo cargar provincias: {e}")
 
-            self.root.after(0, lambda: self._actualizar_combos(acuerdo_opts, catalogo_opts, categoria_opts, region_opts, provincia_opts))
+            self.root.after(0, lambda: self._actualizar_combos(
+                acuerdo_opts, catalogo_opts, categoria_opts,
+                region_opts, provincia_opts, catalogo_categorias_map,
+            ))
 
         except Exception as e:
             err = str(e)
@@ -1830,9 +1903,12 @@ class PeruComprasGUI:
             self.root.after(0, lambda: self.btn_cargar_opts.configure(state="normal"))
             self.root.after(0, lambda: self.btn_iniciar.configure(state="normal"))
 
-    def _actualizar_combos(self, acuerdos, catalogos, categorias, regiones=None, provincias=None):
+    def _actualizar_combos(self, acuerdos, catalogos, categorias, regiones=None, provincias=None, catalogo_categorias_map=None):
         regiones = regiones or []
         provincias = provincias or []
+        # Guardar mapa completo para la cascada local sin re-importar
+        if catalogo_categorias_map:
+            self._catalogo_categorias_map = catalogo_categorias_map
         self.combo_acuerdo["values"] = acuerdos
         self.combo_catalogo["values"] = catalogos
         self.combo_categoria["values"] = categorias
