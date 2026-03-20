@@ -72,37 +72,20 @@ MAX_REINTENTOS = 3
 # Usa "Importar opciones del portal" para actualizar si cambian los catálogos o categorías.
 PORTAL_DEFAULTS: dict = {
     "acuerdos": [
-    'EXT-CE-2022-5 COMPUTADORAS DE ESCRITORIO, COMPUTADORAS PORTÁTILES Y ESCÁNERES',
-],
+        "EXT-CE-2022-5 COMPUTADORAS DE ESCRITORIO, COMPUTADORAS PORTÁTILES Y ESCÁNERES",
+    ],
     "catalogo_por_acuerdo": {
-    'EXT-CE-2022-5 COMPUTADORAS DE ESCRITORIO, COMPUTADORAS PORTÁTILES Y ESCÁNERES': [
-        'ESCÁNERES',
-        'COMPUTADORAS DE ESCRITORIO',
-        'COMPUTADORAS PORTÁTILES',
-    ]
-},
+        "EXT-CE-2022-5 COMPUTADORAS DE ESCRITORIO, COMPUTADORAS PORTÁTILES Y ESCÁNERES": [
+            "COMPUTADORAS DE ESCRITORIO",
+            "COMPUTADORAS PORTÁTILES",
+            "ESCÁNERES",
+        ],
+    },
     "categoria_por_catalogo": {
-    'ESCÁNERES': [
-        'ESCANER DE PLANOS',
-        'ESCANER DE DOCUMENTOS',
-        'ESCANER DE LIBROS',
-    ],
-    'COMPUTADORAS DE ESCRITORIO': [
-        'DISPOSITIVOS DE ALMACENAMIENTO INTERNO',
-        'COMPUTADORA DE ESCRITORIO',
-        'COMPUTADORA TODO EN UNO',
-        'ESTACION DE TRABAJO',
-        'MONITOR',
-        'PANTALLA PUBLICITARIA',
-        'DISPOSITIVOS DE ALMACENAMIENTO EXTERNO',
-        'PANTALLA INTERACTIVA',
-    ],
-    'COMPUTADORAS PORTÁTILES': [
-        'TABLETA',
-        'COMPUTADORA PORTATIL',
-        'ESTACION DE TRABAJO PORTATIL',
-    ]
-},
+        "COMPUTADORAS DE ESCRITORIO": ["MONITOR", "CPU", "EQUIPO COMPLETO"],
+        "COMPUTADORAS PORTÁTILES": ["LAPTOP", "2 EN 1"],
+        "ESCÁNERES": ["ESCÁNER DE MESA", "ESCÁNER PORTÁTIL"],
+    },
 }
 
 # Estado para modo GUI
@@ -118,15 +101,15 @@ ANALIZADOR = None         # instancia de AnalizadorFallos
 # ---------------------------------------------------------------------------
 # LOGGING
 # ---------------------------------------------------------------------------
-_log_handlers: list = [logging.StreamHandler(sys.stdout)]
-try:
-    _log_handlers.append(logging.FileHandler(BASE_DIR / "bot.log", encoding="utf-8"))
-except Exception:
-    pass  # Si el path no es escribible en el exe congelado, solo usa stdout
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=_log_handlers,
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(
+            BASE_DIR / "bot.log", encoding="utf-8"
+        ),
+    ],
 )
 log = logging.getLogger(__name__)
 

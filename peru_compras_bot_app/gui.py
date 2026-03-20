@@ -168,11 +168,18 @@ class PeruComprasGUI:
         self._configurar_logging_gui()
         self._tick_logs()
         self._analizar_excel_actual(silencioso=True)
-        # Pre-rellenar combos con valores por defecto para que los campos no estén en blanco al arrancar
+        # Pre-rellenar combos con opciones del portal precargadas (no requiere importar)
+        _pd = bot.PORTAL_DEFAULTS
+        _cat_map = _pd["categoria_por_catalogo"]
+        _acuerdo0 = _pd["acuerdos"][0] if _pd["acuerdos"] else bot.ACUERDO_TEXTO
+        _catalogos0 = _pd["catalogo_por_acuerdo"].get(_acuerdo0, [bot.CATALOGO_TEXTO])
+        _cat0 = _cat_map.get(bot.CATALOGO_TEXTO, [bot.CATEGORIA_TEXTO])
         self._actualizar_combos(
-            [bot.ACUERDO_TEXTO],
-            [bot.CATALOGO_TEXTO],
-            [bot.CATEGORIA_TEXTO],
+            _pd["acuerdos"],
+            _catalogos0,
+            _cat0,
+            catalogo_categorias_map=_cat_map,
+            silencioso=True,
         )
         self._actualizar_resumen_seleccion()
 
@@ -1903,7 +1910,7 @@ class PeruComprasGUI:
             self.root.after(0, lambda: self.btn_cargar_opts.configure(state="normal"))
             self.root.after(0, lambda: self.btn_iniciar.configure(state="normal"))
 
-    def _actualizar_combos(self, acuerdos, catalogos, categorias, regiones=None, provincias=None, catalogo_categorias_map=None):
+    def _actualizar_combos(self, acuerdos, catalogos, categorias, regiones=None, provincias=None, catalogo_categorias_map=None, silencioso=False):
         regiones = regiones or []
         provincias = provincias or []
         # Guardar mapa completo para la cascada local sin re-importar
@@ -1940,6 +1947,9 @@ class PeruComprasGUI:
             self.categoria_var.set("")
 
         self._actualizar_resumen_seleccion()
+
+        if silencioso:
+            return
 
         if self._es_modo_cobertura():
             self._set_banner(
