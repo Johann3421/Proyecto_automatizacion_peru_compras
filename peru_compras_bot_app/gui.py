@@ -153,6 +153,7 @@ class PeruComprasGUI:
         self.readiness_detail_var = tk.StringVar(
             value="Selecciona un Excel y valida el contenido antes de iniciar."
         )
+        self._asistente_var = tk.StringVar(value="Ahora selecciona tu archivo Excel para comenzar.")
         self.metric_archivo_var = tk.StringVar(value="Sin archivo")
         self.metric_productos_var = tk.StringVar(value="0")
         self.metric_alertas_var = tk.StringVar(value="0")
@@ -403,7 +404,7 @@ class PeruComprasGUI:
         ).pack(anchor="w", pady=(4, 0))
         tk.Label(
             brand,
-            text="Valida archivos, prepara filtros del portal y ejecuta cada módulo desde su propia página, con opción para guardar y continuar después.",
+            text="Sube tu archivo y ejecuta el proceso automáticamente.",
             bg=self.C_HEADER,
             fg="#C5D3E0",
             font=("Segoe UI", 10),
@@ -488,7 +489,7 @@ class PeruComprasGUI:
         ).pack(anchor="w")
         tk.Label(
             hero_left,
-            text="La aplicación separa cada flujo de trabajo, te indica qué falta corregir antes de abrir Chrome y reduce errores comunes antes de ejecutar.",
+            text="Te guía paso a paso para evitar errores antes de ejecutar.",
             bg=self.C_HEADER,
             fg="#C5D3E0",
             font=("Segoe UI", 10),
@@ -533,7 +534,7 @@ class PeruComprasGUI:
         workflow_panel, workflow_body = self._make_panel(
             body,
             "Flujo de trabajo",
-            "Elige el tipo de mejora, valida el Excel y ejecuta el flujo correspondiente.",
+            "Elige qué quieres actualizar.",
         )
         workflow_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
 
@@ -544,15 +545,15 @@ class PeruComprasGUI:
         )
         sidebar_panel.grid(row=1, column=1, sticky="nsew", padx=(10, 0))
 
-        f0 = self._make_section(workflow_body, "0", "Pestañas de trabajo", "Cambia de módulo como si cambiaras de hoja en Excel: cada pestaña conserva su configuración visual dentro del mismo panel.")
+        f0 = self._make_section(workflow_body, "0", "Pestañas de trabajo", "Cada pestaña es un tipo de actualización diferente.")
 
         self._module_notebook = ttk.Notebook(f0, style="Excel.TNotebook")
         self._module_notebook.pack(fill="x")
         self._module_tabs = {}
         module_defs = [
-            (self.MODO_STOCK, "Precio y existencias", "Actualiza stock por parte con una hoja tipo carga masiva."),
-            (self.MODO_COBERTURA, "Cobertura de atención", "Trabaja regiones y plazo máximo con una vista orientada a cobertura."),
-            (self.MODO_PLAZO, "Plazo de entrega máximo", "Usa bloque o artículos como si cambiaras de formato en una planilla."),
+            (self.MODO_STOCK, "Actualizar precios", "Actualiza el precio y stock de tus productos a partir de un archivo Excel."),
+            (self.MODO_COBERTURA, "Disponibilidad", "Define en qué regiones están disponibles tus productos y cuánto tiempo demora la entrega."),
+            (self.MODO_PLAZO, "Tiempo de entrega", "Establece el tiempo máximo de entrega, ya sea para un artículo específico o en bloque."),
         ]
         for mode_key, label, description in module_defs:
             tab = tk.Frame(self._module_notebook, bg="#FFFFFF", padx=14, pady=12)
@@ -580,7 +581,7 @@ class PeruComprasGUI:
 
         self._mode_help_lbl = tk.Label(
             f0,
-            text="Usa 'Precio y existencias' para actualizar stock por número de parte.",
+            text="Usa 'Actualizar precios' para actualizar stock por número de parte.",
             bg=self.C_SUPERFICIE,
             fg=self.C_TEXTO_SUAVE,
             font=("Segoe UI", 9),
@@ -628,7 +629,7 @@ class PeruComprasGUI:
         ).pack(side="left", padx=(18, 0))
         self._plazo_mode_hint_lbl = tk.Label(
             self._plazo_mode_frame,
-            text="Por bloque aplica el mismo plazo a todos los resultados visibles. Por artículos usa Excel con columnas Parte y Plazo.",
+            text="Bloque: mismo plazo para todos. Artículos: un plazo por fila en el Excel.",
             bg=self.C_SUPERFICIE,
             fg=self.C_TEXTO_SUAVE,
             font=("Segoe UI", 9),
@@ -654,7 +655,7 @@ class PeruComprasGUI:
         _Tooltip(self.entry_plazo_general, "Este valor se aplicará a todos los resultados visibles del bloque de plazo.")
         self._plazo_bloque_hint_lbl = tk.Label(
             self._plazo_bloque_frame,
-            text="En modo por bloque no se requiere Excel. El bot buscará por acuerdo, catálogo, categoría, región y provincia.",
+            text="Sin Excel. Completa los filtros y listo.",
             bg=self.C_SUPERFICIE,
             fg=self.C_TEXTO_SUAVE,
             font=("Segoe UI", 9),
@@ -698,7 +699,7 @@ class PeruComprasGUI:
 
         tk.Label(
             f1,
-            text="El sistema revisa columnas, filas vacías, valores inválidos y duplicados antes de permitir la ejecución cuando el módulo usa Excel.",
+            text="Revisamos tu Excel antes de ejecutar para evitar errores.",
             bg=self.C_SUPERFICIE,
             fg=self.C_TEXTO_SUAVE,
             font=("Segoe UI", 9),
@@ -759,7 +760,7 @@ class PeruComprasGUI:
         aviso_f.pack(fill="x", pady=(0, 12))
         tk.Label(
             aviso_f,
-            text="Importa las listas del portal si necesitas que los filtros coincidan exactamente con tu contrato actual.",
+            text="Trae las opciones exactas de tu contrato directamente del portal.",
             bg="#EFF6FF",
             fg="#1D4ED8",
             font=("Segoe UI", 9),
@@ -859,7 +860,7 @@ class PeruComprasGUI:
         )
         tk.Label(
             self._panel_login,
-            text="Chrome está esperando que inicies sesión",
+            text="Se abrió Chrome — inicia sesión y vuelve aquí",
             bg=self.C_LOGIN_BG,
             fg="#7B5800",
             font=("Segoe UI Semibold", 11),
@@ -867,7 +868,7 @@ class PeruComprasGUI:
         ).pack(anchor="w")
         tk.Label(
             self._panel_login,
-            text="1. Ve a la ventana de Chrome que se abrió.\n2. Inicia sesión en Peru Compras.\n3. Vuelve aquí y confirma para continuar.",
+            text="Busca la ventana de Chrome, inicia sesión en Peru Compras y regresa aquí.\nNo cierres Chrome — el bot continúa solo después de que confirmes.",
             bg=self.C_LOGIN_BG,
             fg="#5D4037",
             font=("Segoe UI", 9),
@@ -876,7 +877,7 @@ class PeruComprasGUI:
         ).pack(anchor="w", pady=(6, 10))
         self.btn_login = ttk.Button(
             self._panel_login,
-            text="Ya inicié sesión, continuar",
+            text="Ya inicié sesión — continuar",
             command=self._continuar_login,
             style="Login.TButton",
         )
@@ -1000,6 +1001,34 @@ class PeruComprasGUI:
         )
         self._readiness_detail_lbl.pack(anchor="w")
 
+        # Franja asistente
+        self._asistente_strip = tk.Frame(
+            readiness_card,
+            bg="#EEF6FF",
+            highlightbackground="#93C5FD",
+            highlightthickness=1,
+            padx=10,
+            pady=8,
+        )
+        self._asistente_strip.pack(fill="x", pady=(10, 0))
+        tk.Label(
+            self._asistente_strip,
+            text="Siguiente paso",
+            bg="#EEF6FF",
+            fg="#1D4ED8",
+            font=("Segoe UI", 8),
+        ).pack(anchor="w")
+        tk.Label(
+            self._asistente_strip,
+            textvariable=self._asistente_var,
+            bg="#EEF6FF",
+            fg="#1E40AF",
+            font=("Segoe UI Semibold", 9),
+            anchor="w",
+            justify="left",
+            wraplength=300,
+        ).pack(anchor="w", pady=(2, 0))
+
         selection_card = tk.Frame(
             sidebar_body,
             bg=self.C_SUPERFICIE,
@@ -1092,7 +1121,7 @@ class PeruComprasGUI:
         ).pack(anchor="w")
         tk.Label(
             guide_card,
-            text="1. Elige el módulo correcto.\n2. Carga Excel si ese flujo lo necesita o define el plazo general.\n3. Revisa o importa los filtros del portal.\n4. Guarda progreso si necesitas continuar luego.\n5. Inicia sesión en Chrome cuando se solicite y revisa el reporte al finalizar.",
+            text="1. Elige la pestaña.\n2. Sube tu Excel o define el plazo.\n3. Elige los filtros.\n4. Presiona el botón y espera.",
             bg=self.C_SUPERFICIE,
             fg=self.C_TEXTO_SUAVE,
             font=("Segoe UI", 9),
@@ -1294,6 +1323,60 @@ class PeruComprasGUI:
             anchor="w",
         ).pack(anchor="w", pady=(4, 0))
 
+    def _guiar(self, msg: str):
+        """Actualiza el mensaje tipo asistente en la tarjeta de preparación."""
+        if hasattr(self, "_asistente_var"):
+            self._asistente_var.set(msg)
+
+    def _actualizar_guia_filtros(self):
+        """Revisa qué filtros faltan y muestra el siguiente paso concreto."""
+        acuerdo   = self.acuerdo_var.get().strip()
+        catalogo  = self.catalogo_var.get().strip()
+        categoria = self.categoria_var.get().strip()
+        region    = self.region_var.get().strip()
+        provincia = self.provincia_var.get().strip()
+
+        if self._es_modo_cobertura():
+            if not acuerdo:
+                self._guiar("Falta elegir un Acuerdo Marco.")
+            else:
+                self._guiar("Todo está correcto — puedes comenzar la automatización.")
+        elif self._es_modo_plazo():
+            if not self._es_plazo_individual():
+                plazo = self.plazo_general_var.get().strip()
+                if not acuerdo:
+                    self._guiar("Falta elegir un Acuerdo Marco.")
+                elif not catalogo:
+                    self._guiar("Falta elegir un Catálogo.")
+                elif not categoria:
+                    self._guiar("Falta elegir una Categoría.")
+                elif not plazo:
+                    self._guiar("Falta ingresar el plazo general (días).")
+                else:
+                    self._guiar("Todo está correcto — puedes comenzar la automatización.")
+            else:
+                if not acuerdo:
+                    self._guiar("Falta elegir un Acuerdo Marco.")
+                elif not catalogo:
+                    self._guiar("Falta elegir un Catálogo.")
+                elif not categoria:
+                    self._guiar("Falta elegir una Categoría.")
+                elif not region:
+                    self._guiar("Falta elegir una Región.")
+                elif not provincia:
+                    self._guiar("Falta elegir una Provincia.")
+                else:
+                    self._guiar("Todo está correcto — puedes comenzar la automatización.")
+        else:  # stock
+            if not acuerdo:
+                self._guiar("Falta elegir un Acuerdo Marco.")
+            elif not catalogo:
+                self._guiar("Falta elegir un Catálogo.")
+            elif not categoria:
+                self._guiar("Falta elegir una Categoría.")
+            else:
+                self._guiar("Todo está correcto — puedes comenzar la automatización.")
+
     def _aplicar_estado_preparacion(self, titulo: str, detalle: str, tono: str = "info"):
         tonos = {
             "info": {"bg": "#DCEBFF", "fg": "#0C4A6E", "card": self.C_SUPERFICIE_2},
@@ -1371,10 +1454,10 @@ class PeruComprasGUI:
 
         if self._es_modo_cobertura():
             self._mode_help_lbl.configure(
-                text="Usa 'Cobertura de atención' para agregar regiones y su plazo máximo de entrega por acuerdo marco."
+                text="Usa 'Disponibilidad' para agregar regiones y su plazo máximo de entrega por acuerdo marco."
             )
             self._filter_mode_note_lbl.configure(
-                text="En cobertura solo se utiliza el Acuerdo Marco. Catálogo y Categoría se ignoran en la ejecución."
+                text="Solo necesitas el Acuerdo Marco."
             )
             self.btn_iniciar.configure(text="Comenzar automatización")
             self.quick_status_var.set("Modo cobertura seleccionado")
@@ -1387,19 +1470,19 @@ class PeruComprasGUI:
             self._plazo_mode_frame.pack(fill="x", pady=(0, 12), before=self._excel_row_frame)
             if self._es_plazo_individual():
                 self._mode_help_lbl.configure(
-                    text="Usa 'Plazo de entrega máximo' por artículos para buscar por número de parte y aplicar el plazo de cada fila del Excel."
+                    text="Usa 'Tiempo de entrega' por artículos para buscar por número de parte y aplicar el plazo de cada fila del Excel."
                 )
                 self._filter_mode_note_lbl.configure(
-                    text="En plazo por artículos se usan Acuerdo, Catálogo, Categoría, Región y Provincia, además del Excel con Parte y Plazo."
+                    text="Necesitas todos los filtros y el Excel con columnas Parte y Plazo."
                 )
                 self.btn_iniciar.configure(text="Comenzar automatización")
                 self.metric_archivo_var.set(Path(self.excel_var.get().strip()).name if self.excel_var.get().strip() else "Requerido")
             else:
                 self._mode_help_lbl.configure(
-                    text="Usa 'Plazo de entrega máximo' por bloque para aplicar un mismo plazo a todos los resultados visibles del filtro seleccionado."
+                    text="Usa 'Tiempo de entrega' por bloque para aplicar un mismo plazo a todos los resultados visibles del filtro seleccionado."
                 )
                 self._filter_mode_note_lbl.configure(
-                    text="En plazo por bloque se usan Acuerdo, Catálogo, Categoría, Región y Provincia. No se necesita Excel."
+                    text="Necesitas los filtros. No se requiere Excel."
                 )
                 self._plazo_bloque_frame.pack(fill="x", pady=(0, 12), before=self._excel_row_frame)
                 self.btn_iniciar.configure(text="Comenzar automatización")
@@ -1411,7 +1494,7 @@ class PeruComprasGUI:
             )
         else:
             self._mode_help_lbl.configure(
-                text="Usa 'Precio y existencias' para actualizar stock por número de parte."
+                text="Usa 'Actualizar precios' para actualizar stock por número de parte."
             )
             self._filter_mode_note_lbl.configure(
                 text="En este modo se usan Acuerdo, Catálogo y Categoría."
@@ -1433,20 +1516,20 @@ class PeruComprasGUI:
         provincia = self.provincia_var.get().strip() or "pendiente"
         if self._es_modo_cobertura():
             self.selection_summary_var.set(
-                f"Modo: Cobertura de atención\nArchivo: {archivo}\nAcuerdo: {acuerdo}\nPlazo por archivo: sí\nPausa: {self.pausa_var.get().strip() or '2'} s"
+                f"Modo: Disponibilidad\nArchivo: {archivo}\nAcuerdo: {acuerdo}\nPlazo por archivo: sí\nPausa: {self.pausa_var.get().strip() or '2'} s"
             )
         elif self._es_modo_plazo():
             if self._es_plazo_individual():
                 self.selection_summary_var.set(
-                    f"Modo: Plazo de entrega máximo\nSubmodo: Por artículos\nArchivo: {archivo}\nAcuerdo: {acuerdo}\nCatálogo: {catalogo}\nCategoría: {categoria}\nRegión: {region}\nProvincia: {provincia}\nPausa: {self.pausa_var.get().strip() or '2'} s"
+                    f"Modo: Tiempo de entrega\nSubmodo: Por artículos\nArchivo: {archivo}\nAcuerdo: {acuerdo}\nCatálogo: {catalogo}\nCategoría: {categoria}\nRegión: {region}\nProvincia: {provincia}\nPausa: {self.pausa_var.get().strip() or '2'} s"
                 )
             else:
                 self.selection_summary_var.set(
-                    f"Modo: Plazo de entrega máximo\nSubmodo: Por bloque\nArchivo: no requerido\nAcuerdo: {acuerdo}\nCatálogo: {catalogo}\nCategoría: {categoria}\nRegión: {region}\nProvincia: {provincia}\nPlazo: {self.plazo_general_var.get().strip() or 'pendiente'} día(s)\nPausa: {self.pausa_var.get().strip() or '2'} s"
+                    f"Modo: Tiempo de entrega\nSubmodo: Por bloque\nArchivo: no requerido\nAcuerdo: {acuerdo}\nCatálogo: {catalogo}\nCategoría: {categoria}\nRegión: {region}\nProvincia: {provincia}\nPlazo: {self.plazo_general_var.get().strip() or 'pendiente'} día(s)\nPausa: {self.pausa_var.get().strip() or '2'} s"
                 )
         else:
             self.selection_summary_var.set(
-                f"Modo: Precio y existencias\nArchivo: {archivo}\nAcuerdo: {acuerdo}\nCatálogo: {catalogo}\nCategoría: {categoria}\nPausa: {self.pausa_var.get().strip() or '2'} s"
+                f"Modo: Actualizar precios\nArchivo: {archivo}\nAcuerdo: {acuerdo}\nCatálogo: {catalogo}\nCategoría: {categoria}\nPausa: {self.pausa_var.get().strip() or '2'} s"
             )
 
     def _actualizar_resumen_excel_ui(self, resumen):
@@ -1459,7 +1542,7 @@ class PeruComprasGUI:
             self._validation_detail_lbl.configure(
                 bg="#F0F9FF",
                 fg=self.C_INFO_FG,
-                text="Este flujo no usa Excel. Solo debes completar los filtros y el plazo general antes de iniciar.",
+                text="Sin Excel. Completa los filtros y el plazo, luego presiona el botón.",
             )
             self._validation_examples_lbl.configure(bg="#F0F9FF", fg=self.C_TEXTO_SUAVE, text="")
             self.quick_status_var.set("Completa los filtros y ya puedes empezar")
@@ -1468,6 +1551,7 @@ class PeruComprasGUI:
                 "Este modo no necesita archivo. Solo completa el acuerdo, catálogo, categoría, región, provincia y plazo.",
                 "info",
             )
+            self._actualizar_guia_filtros()
             # Sin Excel requerido: pasos 1 y 2 se marcan automáticamente como completados
             if self._paso_actual <= 2:
                 self._actualizar_stepper(3)
@@ -1483,6 +1567,7 @@ class PeruComprasGUI:
                 "Sube tu Excel y lo revisamos antes de empezar.",
                 "info",
             )
+            self._guiar("Ahora selecciona tu archivo Excel para comenzar.")
             if self._paso_actual > 2:
                 self._actualizar_stepper(1)
             return
@@ -1514,6 +1599,7 @@ class PeruComprasGUI:
                 "El Excel está en orden. Confirma los filtros y presiona el botón para empezar.",
                 "ok",
             )
+            self._actualizar_guia_filtros()
             if self._paso_actual <= 2:
                 self._actualizar_stepper(3)
         else:
@@ -1535,6 +1621,7 @@ class PeruComprasGUI:
                 "Encontramos algunos errores en el Excel. Corrígelos y vuelve a revisarlo.",
                 "warning",
             )
+            self._guiar("Corrige los errores del Excel y vuelve a revisarlo.")
             if self._paso_actual != 2:
                 self._actualizar_stepper(2)
 
@@ -1582,12 +1669,13 @@ class PeruComprasGUI:
     def _mostrar_panel_login(self, mostrar: bool):
         if mostrar:
             self._panel_login.pack(fill="x", pady=(0, 8))
-            self.quick_status_var.set("Esperando confirmación de login en Chrome")
+            self.quick_status_var.set("Esperando que inicies sesión en Chrome")
             self._aplicar_estado_preparacion(
-                "Acción requerida",
-                "La aplicación abrió Chrome. Inicia sesión y vuelve para continuar.",
+                "Solo falta iniciar sesión",
+                "Se abrió Chrome. Inicia sesión en Peru Compras y vuelve aquí para continuar.",
                 "warning",
             )
+            self._guiar("Busca Chrome, inicia sesión en Peru Compras y vuelve aquí.")
         else:
             self._panel_login.pack_forget()
 
@@ -1769,8 +1857,9 @@ class PeruComprasGUI:
     def _continuar_login(self):
         self.login_event.set()
         self.root.after(0, lambda: self._mostrar_panel_login(False))
-        self._set_banner("Login confirmado; el bot continúa con la actualización.", self.C_OK_BG, self.C_OK_FG)
-        self.quick_status_var.set("Login confirmado, retomando automatización")
+        self._set_banner("Sesión confirmada — el bot continúa solo.", self.C_OK_BG, self.C_OK_FG)
+        self.quick_status_var.set("Sesión confirmada, retomando automatización")
+        self._guiar("Sesión confirmada. El bot está trabajando, no cierres la aplicación.")
 
     def _serializar_estado(self):
         return {
@@ -1826,7 +1915,7 @@ class PeruComprasGUI:
         def _update():
             self._mostrar_panel_login(True)
             self._set_banner(
-                "Inicia sesión en Chrome y luego vuelve a esta ventana para continuar.",
+                "Se abrió Chrome. Inicia sesión en Peru Compras y vuelve aquí — el bot espera.",
                 self.C_LOGIN_BG, "#7B5800",
             )
         self.root.after(0, _update)
@@ -1844,6 +1933,7 @@ class PeruComprasGUI:
         self.combo_provincia["values"] = []
         self.provincia_var.set("")
         self._actualizar_resumen_seleccion()
+        self._actualizar_guia_filtros()
         self._set_banner("Acuerdo cambiado. Si necesitas sincronizar catálogos y categorías, importa opciones del portal.")
 
     def _on_catalogo_changed(self, event=None):
@@ -1867,6 +1957,7 @@ class PeruComprasGUI:
             self.combo_provincia["values"] = []
             self.provincia_var.set("")
         self._actualizar_resumen_seleccion()
+        self._actualizar_guia_filtros()
         if cached:
             self._set_banner(f"Catálogo '{cat_sel}': {len(cached)} categorías disponibles.")
         else:
@@ -1876,6 +1967,7 @@ class PeruComprasGUI:
         self.combo_provincia["values"] = []
         self.provincia_var.set("")
         self._actualizar_resumen_seleccion()
+        self._actualizar_guia_filtros()
         self._set_banner("Región cambiada. Si necesitas provincias exactas del portal, vuelve a importar opciones.")
 
     # ------------------------------------------------------------------
@@ -2262,13 +2354,14 @@ class PeruComprasGUI:
         self.btn_pausar.configure(text="Pausar")
         self._pausado = False
         self._actualizar_stepper(4)
-        self._set_banner("Iniciando automatización y abriendo Chrome...", self.C_INFO_BG, self.C_INFO_FG)
+        self._set_banner("Se abrirá Chrome. Solo inicia sesión y vuelve aquí.", self.C_INFO_BG, self.C_INFO_FG)
         self.quick_status_var.set(f"Ejecutando automatización de {self._texto_operacion()}")
         self._aplicar_estado_preparacion(
             "Automatización en curso",
             f"El bot está trabajando en {self._texto_operacion()}. Puedes pausar, detener o seguir el progreso desde esta pantalla.",
             "info",
         )
+        self._guiar("El bot está trabajando. Puedes pausarlo o detenerlo si necesitas.")
         self._actualizar_resumen_seleccion()
 
         self.worker = threading.Thread(
@@ -2338,6 +2431,7 @@ class PeruComprasGUI:
                 "ok",
             ))
             self.root.after(0, lambda: self._actualizar_stepper(0))
+            self.root.after(0, lambda: self._guiar("¡Listo! Revisa el reporte para ver qué se actualizó."))
         except Exception as e:
             detalle = f"{e}\n\n{traceback.format_exc()}"
             log.error(f"Error fatal: {e}", exc_info=True)
@@ -2350,6 +2444,7 @@ class PeruComprasGUI:
                 "La automatización se interrumpió. Revisa el detalle técnico y corrige la causa antes de reintentar.",
                 "error",
             ))
+            self.root.after(0, lambda: self._guiar("Algo salió mal. Revisa el log de errores y vuelve a intentarlo."))
             self.root.after(0, lambda: messagebox.showerror("Error inesperado", detalle))
         finally:
             self.root.after(0, lambda: self.btn_iniciar.configure(state="normal"))
