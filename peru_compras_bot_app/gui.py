@@ -149,14 +149,15 @@ class PeruComprasGUI:
         self.plazo_general_var = tk.StringVar(value="5")
         self.pausa_var    = tk.StringVar(value=str(bot.PAUSA_ENTRE_PRODUCTOS))
         self.estado_var   = tk.StringVar(value="")
-        self.readiness_var = tk.StringVar(value="Pendiente de preparación")
+        self.readiness_var = tk.StringVar(value="Aún no está listo")
         self.readiness_detail_var = tk.StringVar(
             value="Selecciona un Excel y valida el contenido antes de iniciar."
         )
-        self.metric_archivo_var = tk.StringVar(value="Sin revisar")
+        self.metric_archivo_var = tk.StringVar(value="Sin archivo")
         self.metric_productos_var = tk.StringVar(value="0")
         self.metric_alertas_var = tk.StringVar(value="0")
         self.metric_portal_var = tk.StringVar(value="Sin importar")
+        self.metric_progreso_var = tk.StringVar(value="Paso 1 de 4")
         self.metric_reporte_var = tk.StringVar(value="Sin reporte")
         self.selection_summary_var = tk.StringVar(
             value="Aún no hay una configuración lista para ejecutar."
@@ -265,11 +266,118 @@ class PeruComprasGUI:
                         thickness=12)
 
     # ------------------------------------------------------------------
+    # Barra de progreso guiada (stepper)
+    # ------------------------------------------------------------------
+    def _build_stepper(self):
+        """Construye la barra horizontal de pasos en row=2 de root."""
+        C_BG = "#EEF2F7"
+        stepper = tk.Frame(self.root, bg=C_BG, padx=24, pady=10)
+        stepper.grid(row=2, column=0, sticky="ew")
+
+        inner = tk.Frame(stepper, bg=C_BG)
+        inner.pack(side="left")
+
+        tk.Label(
+            stepper,
+            text="Flujo guiado:",
+            bg=C_BG,
+            fg=self.C_TEXTO_SUAVE,
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(0, 14))
+
+        self._step_circles: list = []
+        self._step_texts:  list = []
+        self._step_seps:   list = []
+
+        pasos = [
+            ("1", "Subir archivo Excel"),
+            ("2", "Revisar datos"),
+            ("3", "Elegir opciones"),
+            ("4", "Ejecutar proceso"),
+        ]
+
+        for i, (num, titulo) in enumerate(pasos):
+            if i > 0:
+                sep = tk.Frame(inner, bg=self.C_BORDE, width=38, height=2)
+                sep.pack(side="left", padx=2, pady=0)
+                sep.pack_propagate(False)
+                self._step_seps.append(sep)
+            else:
+                self._step_seps.append(None)
+
+            wrap = tk.Frame(inner, bg=C_BG)
+            wrap.pack(side="left", padx=4)
+
+            circle = tk.Label(
+                wrap,
+                text=num,
+                bg=self.C_STEP_IDLE,
+                fg="#FFFFFF",
+                font=("Segoe UI Semibold", 9),
+                width=3,
+                pady=3,
+            )
+            circle.pack()
+
+            lbl = tk.Label(
+                wrap,
+                text=titulo,
+                bg=C_BG,
+                fg=self.C_STEP_IDLE,
+                font=("Segoe UI", 8),
+            )
+            lbl.pack()
+
+            self._step_circles.append(circle)
+            self._step_texts.append(lbl)
+
+        self._paso_actual = 1
+        self._actualizar_stepper(1)
+
+    def _actualizar_stepper(self, paso: int):
+        """Actualiza los indicadores visuales de los pasos.
+        paso 1-4 = paso activo actual; 0 = todos completados.
+        """
+        if not hasattr(self, "_step_circles"):
+            return
+        self._paso_actual = paso
+        for i in range(4):
+            step_num = i + 1
+            done   = (paso == 0) or (step_num < paso)
+            active = (step_num == paso)
+
+            circle = self._step_circles[i]
+            lbl    = self._step_texts[i]
+
+            if done:
+                circle.configure(bg=self.C_STEP_DONE, text="✓")
+                lbl.configure(fg=self.C_STEP_DONE, font=("Segoe UI Semibold", 8))
+            elif active:
+                circle.configure(bg=self.C_STEP_ACTIVE, text=str(step_num))
+                lbl.configure(fg=self.C_STEP_ACTIVE, font=("Segoe UI Semibold", 8))
+            else:
+                circle.configure(bg=self.C_STEP_IDLE, text=str(step_num))
+                lbl.configure(fg=self.C_STEP_IDLE, font=("Segoe UI", 8))
+
+            # Línea separadora (existe solo para i > 0)
+            sep = self._step_seps[i]
+            if sep is not None:
+                sep_done = (paso == 0) or (step_num <= paso)
+                sep.configure(bg=self.C_STEP_DONE if sep_done else self.C_BORDE)
+
+        # Actualizar tarjeta de progreso en el encabezado
+        if hasattr(self, "metric_progreso_var"):
+            if paso == 0:
+                self.metric_progreso_var.set("Completado ✓")
+            else:
+                self.metric_progreso_var.set(f"Paso {paso} de 4")
+
+    # ------------------------------------------------------------------
     # Construcción de la UI
     # ------------------------------------------------------------------
     def _build_ui(self):
         self.root.grid_columnconfigure(0, weight=1)
-        self.root.grid_rowconfigure(2, weight=1)
+        self.root.grid_rowconfigure(3, weight=1)
 
         header = tk.Frame(self.root, bg=self.C_HEADER, padx=24, pady=18)
         header.grid(row=0, column=0, sticky="ew")
@@ -328,8 +436,10 @@ class PeruComprasGUI:
         )
         self._banner_lbl.pack(fill="both", expand=True)
 
+        self._build_stepper()
+
         content_host = tk.Frame(self.root, bg=self.C_FONDO)
-        content_host.grid(row=2, column=0, sticky="nsew")
+        content_host.grid(row=3, column=0, sticky="nsew")
         content_host.grid_columnconfigure(0, weight=1)
         content_host.grid_rowconfigure(0, weight=1)
 
@@ -417,8 +527,8 @@ class PeruComprasGUI:
         stats_row.pack(anchor="e", pady=(10, 0))
         self._make_metric_card(stats_row, "Archivo", self.metric_archivo_var, 0, dark=True)
         self._make_metric_card(stats_row, "Productos listos", self.metric_productos_var, 1, dark=True)
-        self._make_metric_card(stats_row, "Alertas", self.metric_alertas_var, 2, dark=True)
-        self._make_metric_card(stats_row, "Portal", self.metric_portal_var, 3, dark=True)
+        self._make_metric_card(stats_row, "Problemas", self.metric_alertas_var, 2, dark=True)
+        self._make_metric_card(stats_row, "Progreso", self.metric_progreso_var, 3, dark=True)
 
         workflow_panel, workflow_body = self._make_panel(
             body,
@@ -564,7 +674,7 @@ class PeruComprasGUI:
         self.entry_excel.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         btn_sel = ttk.Button(
             fila_excel,
-            text="Buscar archivo",
+            text="Elegir archivo",
             command=self._seleccionar_excel,
             style="Secundario.TButton",
         )
@@ -575,13 +685,13 @@ class PeruComprasGUI:
         actions_file.pack(fill="x")
         ttk.Button(
             actions_file,
-            text="Descargar plantilla",
+            text="Obtener plantilla",
             command=self._descargar_plantilla,
             style="Secundario.TButton",
         ).pack(side="left")
         ttk.Button(
             actions_file,
-            text="Validar archivo ahora",
+            text="Revisar archivo",
             command=self._analizar_excel_actual,
             style="Secundario.TButton",
         ).pack(side="left", padx=(8, 0))
@@ -606,7 +716,7 @@ class PeruComprasGUI:
         self._validation_box.pack(fill="x", pady=(12, 0))
         self._validation_title_lbl = tk.Label(
             self._validation_box,
-            text="Sin análisis todavía",
+            text="Todavía no revisamos tu archivo",
             bg=self.C_SUPERFICIE_2,
             fg=self.C_TEXTO,
             font=("Segoe UI Semibold", 11),
@@ -615,7 +725,7 @@ class PeruComprasGUI:
         self._validation_title_lbl.pack(anchor="w")
         self._validation_detail_lbl = tk.Label(
             self._validation_box,
-            text="Selecciona un archivo para revisar qué tan listo está antes de ejecutar.",
+            text="Sube tu Excel y te decimos si está listo para usar.",
             bg=self.C_SUPERFICIE_2,
             fg=self.C_TEXTO_SUAVE,
             font=("Segoe UI", 9),
@@ -659,7 +769,7 @@ class PeruComprasGUI:
         ).pack(side="left", fill="x", expand=True)
         self.btn_cargar_opts = ttk.Button(
             aviso_f,
-            text="Importar opciones del portal",
+            text="Traer opciones del portal",
             command=self._cargar_opciones,
             style="Secundario.TButton",
         )
@@ -701,7 +811,7 @@ class PeruComprasGUI:
         self._avanzado_visible = tk.BooleanVar(value=False)
         self._btn_avanzado = ttk.Button(
             f2,
-            text="Ver configuración avanzada",
+            text="Opciones avanzadas",
             command=self._toggle_avanzado,
             style="Secundario.TButton",
         )
@@ -733,7 +843,7 @@ class PeruComprasGUI:
 
         self.btn_iniciar = ttk.Button(
             f3,
-            text="Iniciar actualización de stock",
+            text="Comenzar automatización",
             command=self._iniciar,
             style="Accion.TButton",
         )
@@ -1266,7 +1376,7 @@ class PeruComprasGUI:
             self._filter_mode_note_lbl.configure(
                 text="En cobertura solo se utiliza el Acuerdo Marco. Catálogo y Categoría se ignoran en la ejecución."
             )
-            self.btn_iniciar.configure(text="Iniciar actualización de cobertura")
+            self.btn_iniciar.configure(text="Comenzar automatización")
             self.quick_status_var.set("Modo cobertura seleccionado")
             self._set_banner(
                 "Modo cobertura activo: el Excel debe tener columnas de región y plazo.",
@@ -1282,7 +1392,7 @@ class PeruComprasGUI:
                 self._filter_mode_note_lbl.configure(
                     text="En plazo por artículos se usan Acuerdo, Catálogo, Categoría, Región y Provincia, además del Excel con Parte y Plazo."
                 )
-                self.btn_iniciar.configure(text="Iniciar carga individual de plazo")
+                self.btn_iniciar.configure(text="Comenzar automatización")
                 self.metric_archivo_var.set(Path(self.excel_var.get().strip()).name if self.excel_var.get().strip() else "Requerido")
             else:
                 self._mode_help_lbl.configure(
@@ -1292,7 +1402,7 @@ class PeruComprasGUI:
                     text="En plazo por bloque se usan Acuerdo, Catálogo, Categoría, Región y Provincia. No se necesita Excel."
                 )
                 self._plazo_bloque_frame.pack(fill="x", pady=(0, 12), before=self._excel_row_frame)
-                self.btn_iniciar.configure(text="Iniciar actualización de plazo por bloque")
+                self.btn_iniciar.configure(text="Comenzar automatización")
             self.quick_status_var.set("Modo plazo seleccionado")
             self._set_banner(
                 "Modo plazo activo: elige trabajo por bloque o por artículos antes de ejecutar.",
@@ -1306,7 +1416,7 @@ class PeruComprasGUI:
             self._filter_mode_note_lbl.configure(
                 text="En este modo se usan Acuerdo, Catálogo y Categoría."
             )
-            self.btn_iniciar.configure(text="Iniciar actualización de stock")
+            self.btn_iniciar.configure(text="Comenzar automatización")
             self.quick_status_var.set("Modo precio y existencias seleccionado")
             self._set_banner(
                 "Modo precio y existencias activo: el Excel debe tener columnas Parte y Stock.",
@@ -1352,24 +1462,29 @@ class PeruComprasGUI:
                 text="Este flujo no usa Excel. Solo debes completar los filtros y el plazo general antes de iniciar.",
             )
             self._validation_examples_lbl.configure(bg="#F0F9FF", fg=self.C_TEXTO_SUAVE, text="")
-            self.quick_status_var.set("Completa filtros de plazo por bloque")
+            self.quick_status_var.set("Completa los filtros y ya puedes empezar")
             self._aplicar_estado_preparacion(
-                "Listo para preparar bloque",
-                "El módulo por bloque no requiere archivo. Verifica acuerdo, catálogo, categoría, región, provincia y plazo general.",
+                "Sin Excel — solo elige los filtros",
+                "Este modo no necesita archivo. Solo completa el acuerdo, catálogo, categoría, región, provincia y plazo.",
                 "info",
             )
+            # Sin Excel requerido: pasos 1 y 2 se marcan automáticamente como completados
+            if self._paso_actual <= 2:
+                self._actualizar_stepper(3)
             return
 
         if resumen is None:
-            self.metric_archivo_var.set("Sin revisar")
+            self.metric_archivo_var.set("Sin archivo")
             self.metric_productos_var.set("0")
             self.metric_alertas_var.set("0")
-            self.quick_status_var.set("Selecciona un archivo para empezar")
+            self.quick_status_var.set("Sube tu archivo para comenzar")
             self._aplicar_estado_preparacion(
-                "Pendiente de preparación",
-                "Selecciona un Excel y revisa el resumen previo antes de iniciar.",
+                "Aún no está listo",
+                "Sube tu Excel y lo revisamos antes de empezar.",
                 "info",
             )
+            if self._paso_actual > 2:
+                self._actualizar_stepper(1)
             return
 
         self.metric_archivo_var.set(resumen.file_path.name)
@@ -1382,7 +1497,7 @@ class PeruComprasGUI:
             if resumen.warnings:
                 detalle += " Hay advertencias no bloqueantes para revisar."
             self._validation_box.configure(bg="#F0FDF4", highlightbackground="#86EFAC")
-            self._validation_title_lbl.configure(bg="#F0FDF4", fg=self.C_OK_FG, text="Archivo validado correctamente")
+            self._validation_title_lbl.configure(bg="#F0FDF4", fg=self.C_OK_FG, text="Tu archivo está listo")
             self._validation_detail_lbl.configure(
                 bg="#F0FDF4",
                 fg=self.C_OK_FG,
@@ -1393,12 +1508,14 @@ class PeruComprasGUI:
                 fg=self.C_ADVERTENCIA if resumen.warnings else self.C_OK_FG,
                 text="\n".join(resumen.warnings[:3]),
             )
-            self.quick_status_var.set("Listo para iniciar la automatización")
+            self.quick_status_var.set("Todo listo — elige los filtros y comienza")
             self._aplicar_estado_preparacion(
-                "Listo para ejecutar",
-                "El Excel pasó la validación. Solo confirma los filtros del portal y arranca el proceso.",
+                "Tu archivo está listo",
+                "El Excel está en orden. Confirma los filtros y presiona el botón para empezar.",
                 "ok",
             )
+            if self._paso_actual <= 2:
+                self._actualizar_stepper(3)
         else:
             self._validation_box.configure(bg="#FFF7E8", highlightbackground="#FCD34D")
             self._validation_title_lbl.configure(bg="#FFF7E8", fg=self.C_ADVERTENCIA, text="El archivo necesita correcciones")
@@ -1412,12 +1529,14 @@ class PeruComprasGUI:
                 fg=self.C_ADVERTENCIA,
                 text="\n".join(resumen.issue_examples[:4]),
             )
-            self.quick_status_var.set("Corrige el Excel antes de iniciar")
+            self.quick_status_var.set("El archivo tiene errores — revísalo")
             self._aplicar_estado_preparacion(
-                "Requiere correcciones",
-                "Hay errores en el Excel que impedirían una ejecución estable. Corrígelos antes de abrir Chrome.",
+                "Tu archivo necesita correcciones",
+                "Encontramos algunos errores en el Excel. Corrígelos y vuelve a revisarlo.",
                 "warning",
             )
+            if self._paso_actual != 2:
+                self._actualizar_stepper(2)
 
     def _make_combo_row(self, parent, row: int, label: str, variable: tk.StringVar, tip: str) -> ttk.Combobox:
         lbl = tk.Label(parent, text=label, bg=self.C_SUPERFICIE,
@@ -1435,7 +1554,7 @@ class PeruComprasGUI:
     def _toggle_avanzado(self):
         if self._avanzado_visible.get():
             self._frame_avanzado.pack_forget()
-            self._btn_avanzado.configure(text="Ver configuración avanzada")
+            self._btn_avanzado.configure(text="Opciones avanzadas")
             self._avanzado_visible.set(False)
         else:
             self._frame_avanzado.pack(anchor="w", pady=(4, 0))
@@ -1595,6 +1714,8 @@ class PeruComprasGUI:
         if ruta:
             self.excel_var.set(ruta)
             self._set_banner(f"Archivo seleccionado: {Path(ruta).name}", self.C_INFO_BG, self.C_INFO_FG)
+            if self._paso_actual <= 1:
+                self._actualizar_stepper(2)
             self._analizar_excel_actual(silencioso=True)
 
     def _descargar_plantilla(self):
@@ -2082,7 +2203,7 @@ class PeruComprasGUI:
             messagebox.showerror(
                 "Archivo no encontrado",
                 f"No se encontró el archivo:\n{excel}\n\n"
-                "Usa el botón 'Buscar archivo' para seleccionar tu Excel."
+                "Usa el botón 'Elegir archivo' para seleccionar tu Excel."
             )
             return
         if self._requiere_excel() and not resumen.is_ready:
@@ -2094,7 +2215,7 @@ class PeruComprasGUI:
         if self._es_modo_cobertura() and not acuerdo:
             messagebox.showerror(
                 "Filtros incompletos",
-                "Debes completar el Acuerdo Marco del Paso 2.\n\nUsa 'Importar opciones del portal' si el desplegable está vacío.",
+                "Debes completar el Acuerdo Marco del Paso 2.\n\nUsa 'Traer opciones del portal' si el desplegable está vacío.",
             )
             return
         if self._es_modo_plazo() and (not acuerdo or not catalogo or not categoria or not region or not provincia):
@@ -2102,7 +2223,7 @@ class PeruComprasGUI:
                 "Filtros incompletos",
                 "Debes completar los filtros de plazo:\n"
                 "  • Acuerdo Marco\n  • Catálogo\n  • Categoría\n  • Región\n  • Provincia\n\n"
-                "Usa 'Importar opciones del portal' si necesitas traer las listas exactas.",
+                "Usa 'Traer opciones del portal' si necesitas traer las listas exactas.",
             )
             return
         if not self._es_modo_cobertura() and not self._es_modo_plazo() and (not acuerdo or not catalogo or not categoria):
@@ -2110,7 +2231,7 @@ class PeruComprasGUI:
                 "Filtros incompletos",
                 "Debes completar los tres filtros del Paso 2:\n"
                 "  • Acuerdo Marco\n  • Catálogo\n  • Categoría\n\n"
-                "Usa 'Importar opciones del portal' si los desplegables están vacíos."
+                "Usa 'Traer opciones del portal' si los desplegables están vacíos."
             )
             return
         try:
@@ -2140,6 +2261,7 @@ class PeruComprasGUI:
         self.btn_iniciar.configure(state="disabled")
         self.btn_pausar.configure(text="Pausar")
         self._pausado = False
+        self._actualizar_stepper(4)
         self._set_banner("Iniciando automatización y abriendo Chrome...", self.C_INFO_BG, self.C_INFO_FG)
         self.quick_status_var.set(f"Ejecutando automatización de {self._texto_operacion()}")
         self._aplicar_estado_preparacion(
@@ -2215,6 +2337,7 @@ class PeruComprasGUI:
                 f"Se generó un reporte con {exitos} éxito(s) y {fallos} fallo(s).",
                 "ok",
             ))
+            self.root.after(0, lambda: self._actualizar_stepper(0))
         except Exception as e:
             detalle = f"{e}\n\n{traceback.format_exc()}"
             log.error(f"Error fatal: {e}", exc_info=True)
