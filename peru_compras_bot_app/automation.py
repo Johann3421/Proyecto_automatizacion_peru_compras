@@ -109,11 +109,41 @@ PORTAL_DEFAULTS: dict = {
 MODO_GUI = False
 EVENTO_LOGIN = None
 GUI_NOTIFICAR_LOGIN = None
+EVENTO_CONTINUAR = None        # threading.Event: espera confirmación genérica del usuario
+GUI_NOTIFICAR_CONTINUAR = None # callable(mensaje): muestra panel "Continuar" en la UI
+GUI_PROGRESO = None            # callable(mensaje): actualiza el estado de progreso en la UI
 
 # Control de ejecución (pausa / detenición / aprendizaje)
 PAUSA_EVENTO = None       # threading.Event: set=corriendo, clear=en pausa
 DETENER_EVENTO = None     # threading.Event: set=detener
 ANALIZADOR = None         # instancia de AnalizadorFallos
+
+
+def _esperar_confirmacion(mensaje: str = "Presiona Continuar para seguir.") -> None:
+    """Pausa la automatización y espera confirmación del usuario.
+    - En modo GUI muestra el panel 'Continuar' y espera el click del botón.
+    - En modo CLI imprime el mensaje y espera ENTER.
+    - Si MODO_GUI=True pero el evento no está configurado, continúa sin bloquear.
+    """
+    if MODO_GUI:
+        if EVENTO_CONTINUAR is not None and GUI_NOTIFICAR_CONTINUAR is not None:
+            GUI_NOTIFICAR_CONTINUAR(mensaje)
+            EVENTO_CONTINUAR.clear()
+            EVENTO_CONTINUAR.wait()
+        else:
+            log.warning("GUI mode sin EVENTO_CONTINUAR configurado — continuando sin esperar.")
+    else:
+        input(f"\n{mensaje}\n>>> Presiona ENTER para continuar... ")
+
+
+def _progreso(mensaje: str) -> None:
+    """Envía un mensaje de progreso a la UI (si está configurada)."""
+    if MODO_GUI and GUI_PROGRESO is not None:
+        try:
+            GUI_PROGRESO(mensaje)
+        except Exception:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -1468,16 +1498,20 @@ def paso1_login(driver):
     log.info("PASO 1: Login y verificacion")
     log.info("=" * 60)
 
+    _progreso("Cargando página de login…")
     driver.get(LOGIN_URL)
     log.info(f"Pagina cargada: {LOGIN_URL}")
 
     # --- Esperar a que el usuario llene credenciales manualmente ---
-    if MODO_GUI and EVENTO_LOGIN is not None:
-        log.info("Esperando confirmación de login desde la interfaz...")
-        if GUI_NOTIFICAR_LOGIN:
-            GUI_NOTIFICAR_LOGIN()
-        EVENTO_LOGIN.clear()
-        EVENTO_LOGIN.wait()
+    if MODO_GUI:
+        if EVENTO_LOGIN is not None:
+            log.info("Esperando confirmación de login desde la interfaz...")
+            if GUI_NOTIFICAR_LOGIN:
+                GUI_NOTIFICAR_LOGIN()
+            EVENTO_LOGIN.clear()
+            EVENTO_LOGIN.wait()
+        else:
+            log.warning("GUI mode sin EVENTO_LOGIN configurado — continuando sin esperar login.")
     else:
         print("\n" + "=" * 60)
         print("ACCION MANUAL REQUERIDA")
@@ -1813,6 +1847,7 @@ def paso4_actualizar_plazo_individual(
         parte = str(fila["Parte"]).strip()
         plazo = int(fila["Plazo"])
         log.info(f"\n--- Producto {int(idx) + 1}/{total}: Parte={parte}, Plazo={plazo} ---")
+        _progreso(f"Procesando producto {int(idx) + 1} de {total}…")
 
         t_inicio = time.time()
         try:
@@ -1991,6 +2026,7 @@ def paso4_actualizar_cobertura(driver, df: pd.DataFrame):
         region = str(fila["Region"]).strip()
         plazo = int(fila["Plazo"])
         log.info(f"\n--- Región {int(idx) + 1}/{total}: Región={region}, Plazo={plazo} ---")
+        _progreso(f"Procesando región {int(idx) + 1} de {total}…")
 
         t_inicio = time.time()
         try:
@@ -2070,18 +2106,21 @@ def paso3_filtros(driver):
 
     # Acuerdo Marco
     log.info("  Seleccionando Acuerdo Marco...")
+    _progreso("Leyendo acuerdos…")
     select_acuerdo = esperar_opciones_select(driver, "ajaxAcuerdo", WAIT_LARGO)
     seleccionar_por_texto_parcial(select_acuerdo, ACUERDO_TEXTO)
     time.sleep(2)  # Esperar carga del siguiente select
 
     # Catalogo Electronico
     log.info("  Seleccionando Catalogo Electronico...")
+    _progreso("Leyendo catálogos…")
     select_catalogo = esperar_opciones_select(driver, "ajaxCatalogo", WAIT_LARGO)
     seleccionar_por_texto_parcial(select_catalogo, CATALOGO_TEXTO)
     time.sleep(2)
 
     # Categoria
     log.info("  Seleccionando Categoria...")
+    _progreso("Leyendo categorías…")
     select_categoria = esperar_opciones_select(driver, "ajaxCategoria", WAIT_LARGO)
     seleccionar_por_texto_parcial(select_categoria, CATEGORIA_TEXTO)
     time.sleep(1)
@@ -2114,6 +2153,7 @@ def paso4_actualizar_stock(driver, df: pd.DataFrame):
         parte = str(fila["Parte"]).strip()
         stock = str(int(fila["Stock"]))
         log.info(f"\n--- Producto {int(idx) + 1}/{total}: Parte={parte}, Stock={stock} ---")
+        _progreso(f"Procesando producto {int(idx) + 1} de {total}…")
 
         t_inicio = time.time()
         resultado_registrado = False
@@ -2561,14 +2601,18 @@ def ejecutar_bot(
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
 
+    _progreso("Abriendo navegador…")
     driver = webdriver.Chrome(options=chrome_options)
 
     reporte_generado = False
     try:
         paso1_login(driver)
+        _progreso("Navegando al módulo de precios…")
         paso2_navegacion(driver)
+        _progreso("Aplicando filtros…")
         paso3_filtros(driver)
         paso4_actualizar_stock(driver, df)
+        _progreso("Generando reporte…")
         generar_reporte_excel(acuerdo_texto, catalogo_texto, categoria_texto)
         reporte_generado = True
         if ANALIZADOR:
@@ -2625,14 +2669,18 @@ def ejecutar_bot_cobertura(
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
 
+    _progreso("Abriendo navegador…")
     driver = webdriver.Chrome(options=chrome_options)
 
     reporte_generado = False
     try:
         paso1_login(driver)
+        _progreso("Navegando al módulo de cobertura…")
         paso2_navegacion_cobertura(driver)
+        _progreso("Aplicando filtros…")
         paso3_filtros_cobertura(driver)
         paso4_actualizar_cobertura(driver, df)
+        _progreso("Generando reporte…")
         generar_reporte_cobertura_excel(acuerdo_texto)
         reporte_generado = True
         if ANALIZADOR:
@@ -2698,12 +2746,14 @@ def ejecutar_bot_plazo(
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
 
+    _progreso("Abriendo navegador…")
     driver = webdriver.Chrome(options=chrome_options)
 
     contexto = f"{catalogo_texto} | {categoria_texto} | {region_texto} | {provincia_texto}"
     reporte_generado = False
     try:
         paso1_login(driver)
+        _progreso("Navegando al módulo de plazo…")
         paso2_navegacion_plazo(driver)
         if modo_carga == "bloque":
             paso4_actualizar_plazo_bloque(
@@ -2725,6 +2775,7 @@ def ejecutar_bot_plazo(
                 region_texto=region_texto,
                 provincia_texto=provincia_texto,
             )
+        _progreso("Generando reporte…")
         generar_reporte_plazo_excel(contexto)
         reporte_generado = True
         if ANALIZADOR:
@@ -2746,10 +2797,11 @@ def ejecutar_bot_plazo(
 
 def main_cli():
     """Modo clásico por consola."""
-    global MODO_GUI, EVENTO_LOGIN, GUI_NOTIFICAR_LOGIN
+    global MODO_GUI, EVENTO_LOGIN, GUI_NOTIFICAR_LOGIN, GUI_PROGRESO
     MODO_GUI = False
     EVENTO_LOGIN = None
     GUI_NOTIFICAR_LOGIN = None
+    GUI_PROGRESO = None
 
     try:
         reporte = ejecutar_bot(

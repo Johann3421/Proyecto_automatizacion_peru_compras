@@ -127,6 +127,7 @@ class PeruComprasGUI:
 
         self.log_queue = Queue()
         self.login_event = threading.Event()
+        self.continuar_event = threading.Event()
         self.worker = None
         self.reporte_generado = None
         self._pausado = False
@@ -882,6 +883,41 @@ class PeruComprasGUI:
             style="Login.TButton",
         )
         self.btn_login.pack(fill="x")
+
+        # Panel genérico "Continuar" (para pausas del bot que requieren confirmación)
+        self._continuar_msg_var = tk.StringVar(value="")
+        self._panel_continuar = tk.Frame(
+            f3,
+            bg="#F0FDF4",
+            highlightbackground="#86EFAC",
+            highlightthickness=2,
+            padx=14,
+            pady=12,
+        )
+        tk.Label(
+            self._panel_continuar,
+            text="El bot necesita tu confirmación",
+            bg="#F0FDF4",
+            fg=self.C_OK_FG,
+            font=("Segoe UI Semibold", 11),
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            self._panel_continuar,
+            textvariable=self._continuar_msg_var,
+            bg="#F0FDF4",
+            fg="#166534",
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=360,
+        ).pack(anchor="w", pady=(6, 10))
+        ttk.Button(
+            self._panel_continuar,
+            text="Continuar",
+            command=self._confirmar_continuar,
+            style="Login.TButton",
+        ).pack(fill="x")
 
         self._panel_ctrl = tk.Frame(f3, bg=self.C_SUPERFICIE)
         prog_frame = tk.Frame(self._panel_ctrl, bg=self.C_SUPERFICIE)
@@ -1861,6 +1897,35 @@ class PeruComprasGUI:
         self.quick_status_var.set("Sesión confirmada, retomando automatización")
         self._guiar("Sesión confirmada. El bot está trabajando, no cierres la aplicación.")
 
+    # ------------------------------------------------------------------
+    # Panel genérico "Continuar"
+    # ------------------------------------------------------------------
+    def _mostrar_panel_continuar(self, mostrar: bool, mensaje: str = ""):
+        if mostrar:
+            self._continuar_msg_var.set(mensaje)
+            self._panel_continuar.pack(fill="x", pady=(0, 8))
+            self.quick_status_var.set("El bot espera tu confirmación")
+            self._guiar("Presiona 'Continuar' para que el bot siga trabajando.")
+        else:
+            self._panel_continuar.pack_forget()
+
+    def _confirmar_continuar(self):
+        self.continuar_event.set()
+        self._mostrar_panel_continuar(False)
+        self._set_banner("Confirmado — el bot continúa.", self.C_OK_BG, self.C_OK_FG)
+        self.quick_status_var.set("Retomando automatización")
+        self._guiar("El bot está trabajando. Puedes pausarlo si necesitas.")
+
+    def _notificar_continuar_ui(self, mensaje: str = "El bot necesita tu confirmación para seguir."):
+        def _update():
+            self._mostrar_panel_continuar(True, mensaje)
+        self.root.after(0, _update)
+
+    def _notificar_progreso_ui(self, mensaje: str):
+        def _update():
+            self.quick_status_var.set(mensaje)
+        self.root.after(0, _update)
+
     def _serializar_estado(self):
         return {
             "operation": self.operation_var.get(),
@@ -1989,6 +2054,9 @@ class PeruComprasGUI:
         bot.MODO_GUI = True
         bot.EVENTO_LOGIN = self.login_event
         bot.GUI_NOTIFICAR_LOGIN = self._notificar_login_ui
+        bot.EVENTO_CONTINUAR = self.continuar_event
+        bot.GUI_NOTIFICAR_CONTINUAR = self._notificar_continuar_ui
+        bot.GUI_PROGRESO = self._notificar_progreso_ui
         driver = None
         try:
             chrome_opts = bot.Options()
@@ -2375,6 +2443,9 @@ class PeruComprasGUI:
         bot.MODO_GUI = True
         bot.EVENTO_LOGIN = self.login_event
         bot.GUI_NOTIFICAR_LOGIN = self._notificar_login_ui
+        bot.EVENTO_CONTINUAR = self.continuar_event
+        bot.GUI_NOTIFICAR_CONTINUAR = self._notificar_continuar_ui
+        bot.GUI_PROGRESO = self._notificar_progreso_ui
         bot.PAUSA_EVENTO = threading.Event()
         bot.PAUSA_EVENTO.set()
         bot.DETENER_EVENTO = threading.Event()
