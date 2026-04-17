@@ -42,7 +42,7 @@ Archivos modificados: `peru_compras_bot_app/gui.py`, `peru_compras_bot_app/autom
 **Solución aplicada en `gui.py`:**
 
 | Texto original | Texto nuevo |
-|---|---|
+| --- | --- |
 | `"Archivo validado correctamente"` | `"Tu archivo está listo"` |
 | `"Se ignorarán filas vacías"` | `"Se saltarán filas vacías automáticamente"` |
 | `"Validar archivo ahora"` | `"Revisar archivo"` |
@@ -114,7 +114,7 @@ Archivos modificados: `peru_compras_bot_app/gui.py`, `peru_compras_bot_app/autom
 **Solución aplicada en `gui.py`:**
 
 | Texto original | Texto nuevo |
-|---|---|
+| --- | --- |
 | `"Valida archivos, prepara filtros del portal…"` | `"Sube tu archivo y ejecuta el proceso automáticamente."` |
 | `"La aplicación separa cada flujo…"` | `"Te guía paso a paso para evitar errores antes de ejecutar."` |
 | `"Elige el tipo de mejora, valida…"` | `"Elige qué quieres actualizar."` |
@@ -158,7 +158,7 @@ Archivos modificados: `peru_compras_bot_app/gui.py`, `peru_compras_bot_app/autom
 - Llamadas insertadas en los puntos clave del flujo:
 
 | Punto del flujo | Mensaje mostrado |
-|---|---|
+| --- | --- |
 | Antes de `webdriver.Chrome()` | `"Abriendo navegador…"` |
 | Después de `driver.get(LOGIN_URL)` | `"Cargando página de login…"` |
 | Inicio de `paso2_navegacion` (precios) | `"Navegando al módulo de precios…"` |
@@ -194,6 +194,6 @@ Archivos modificados: `peru_compras_bot_app/gui.py`, `peru_compras_bot_app/autom
 ## Resumen de archivos modificados
 
 | Archivo | Cambios |
-|---|---|
+| --- | --- |
 | `peru_compras_bot_app/gui.py` | Cambios 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 |
 | `peru_compras_bot_app/automation.py` | Cambios 9, 10 |
