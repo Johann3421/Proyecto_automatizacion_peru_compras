@@ -31,3 +31,5 @@ desktop.ini
 
 # ── VS Code ───────────────────────────────────────────────────
 .vscode/
+wsp_server.json
+GUIA_NOTIFICACIONES_WSP.MD

@@ -2,7 +2,7 @@
 ; Requires Inno Setup 6+
 
 #define MyAppName "Peru Compras Bot"
-#define MyAppVersion "1.3.5"
+#define MyAppVersion "1.4.1"
 #define MyAppPublisher "Peru Compras"
 #define MyAppExeName "peru_compras_bot.exe"
 
@@ -15,7 +15,7 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=installer_output
-OutputBaseFilename=PeruComprasBot_Setup_1_3_5
+OutputBaseFilename=PeruComprasBot_Setup_1_4_1
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -32,6 +32,9 @@ Name: "desktopicon"; Description: "Crear acceso directo en el escritorio"; Group
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "productos.xlsx"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
+; Credenciales del servidor WSP (bundled por el admin antes de empaquetar)
+; Si wsp_server.json no existe, esta línea se ignora en tiempo de compilación
+Source: "wsp_server.json"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
