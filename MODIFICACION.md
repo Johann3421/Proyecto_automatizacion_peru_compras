@@ -178,9 +178,22 @@ Archivos modificados: `peru_compras_bot_app/gui.py`, `peru_compras_bot_app/autom
 
 ---
 
+---
+
+## Cambio 11 — Reducción del hero section
+
+**Problema:** El header superior y el bloque hero interior eran demasiado altos, empujando el contenido útil (filtros, módulos, botón de ejecución) fuera del viewport inicial.
+
+**Solución aplicada en `gui.py`:**
+
+- `header` (barra superior): `pady` reducido de `18` → `10`; fuente del título principal de `21` → `16`; eliminado el label secundario `"Sube tu archivo y ejecuta el proceso automáticamente."`.
+- `hero` (bloque interior en el body): `pady` reducido de `18` → `10`; eliminado el label secundario `"Te guía paso a paso para evitar errores antes de ejecutar."`.
+
+---
+
 ## Resumen de archivos modificados
 
 | Archivo | Cambios |
 |---|---|
-| `peru_compras_bot_app/gui.py` | Cambios 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 |
+| `peru_compras_bot_app/gui.py` | Cambios 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 |
 | `peru_compras_bot_app/automation.py` | Cambios 9, 10 |

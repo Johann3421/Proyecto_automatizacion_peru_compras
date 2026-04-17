@@ -7,6 +7,8 @@ import traceback
 from pathlib import Path
 from queue import Empty, Queue
 
+import pandas as pd
+
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -185,6 +187,7 @@ class PeruComprasGUI:
             silencioso=True,
         )
         self._actualizar_resumen_seleccion()
+        self.root.after(200, self._mostrar_asistente_inicio)
 
     # ------------------------------------------------------------------
     # Tema ttk personalizado
@@ -295,7 +298,8 @@ class PeruComprasGUI:
             ("1", "Subir archivo Excel"),
             ("2", "Revisar datos"),
             ("3", "Elegir opciones"),
-            ("4", "Ejecutar proceso"),
+            ("4", "Iniciar sesión"),
+            ("5", "Ejecutar proceso"),
         ]
 
         for i, (num, titulo) in enumerate(pasos):
@@ -338,12 +342,12 @@ class PeruComprasGUI:
 
     def _actualizar_stepper(self, paso: int):
         """Actualiza los indicadores visuales de los pasos.
-        paso 1-4 = paso activo actual; 0 = todos completados.
+        paso 1-5 = paso activo actual; 0 = todos completados.
         """
         if not hasattr(self, "_step_circles"):
             return
         self._paso_actual = paso
-        for i in range(4):
+        for i in range(5):
             step_num = i + 1
             done   = (paso == 0) or (step_num < paso)
             active = (step_num == paso)
@@ -372,7 +376,7 @@ class PeruComprasGUI:
             if paso == 0:
                 self.metric_progreso_var.set("Completado ✓")
             else:
-                self.metric_progreso_var.set(f"Paso {paso} de 4")
+                self.metric_progreso_var.set(f"Paso {paso} de 5")
 
     # ------------------------------------------------------------------
     # Construcción de la UI
@@ -381,7 +385,7 @@ class PeruComprasGUI:
         self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_rowconfigure(3, weight=1)
 
-        header = tk.Frame(self.root, bg=self.C_HEADER, padx=24, pady=18)
+        header = tk.Frame(self.root, bg=self.C_HEADER, padx=24, pady=10)
         header.grid(row=0, column=0, sticky="ew")
         header.grid_columnconfigure(0, weight=1)
 
@@ -400,18 +404,9 @@ class PeruComprasGUI:
             text="Panel de stock, cobertura y plazo",
             bg=self.C_HEADER,
             fg="#FFFFFF",
-            font=("Bahnschrift SemiBold", 21),
+            font=("Bahnschrift SemiBold", 16),
             anchor="w",
         ).pack(anchor="w", pady=(4, 0))
-        tk.Label(
-            brand,
-            text="Sube tu archivo y ejecuta el proceso automáticamente.",
-            bg=self.C_HEADER,
-            fg="#C5D3E0",
-            font=("Segoe UI", 10),
-            anchor="w",
-            justify="left",
-        ).pack(anchor="w", pady=(6, 0))
 
         self._readiness_pill = tk.Label(
             header,
@@ -472,7 +467,7 @@ class PeruComprasGUI:
             highlightbackground="#203B62",
             highlightthickness=1,
             padx=18,
-            pady=18,
+            pady=10,
         )
         hero.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 16))
         hero.grid_columnconfigure(0, weight=1)
@@ -488,19 +483,8 @@ class PeruComprasGUI:
             font=("Bahnschrift SemiBold", 17),
             anchor="w",
         ).pack(anchor="w")
-        tk.Label(
-            hero_left,
-            text="Te guía paso a paso para evitar errores antes de ejecutar.",
-            bg=self.C_HEADER,
-            fg="#C5D3E0",
-            font=("Segoe UI", 10),
-            anchor="w",
-            justify="left",
-            wraplength=560,
-        ).pack(anchor="w", pady=(8, 14))
-
         hero_actions = tk.Frame(hero_left, bg=self.C_HEADER)
-        hero_actions.pack(anchor="w")
+        hero_actions.pack(anchor="w", pady=(8, 0))
         ttk.Button(
             hero_actions,
             text="Seleccionar Excel",
@@ -546,7 +530,7 @@ class PeruComprasGUI:
         )
         sidebar_panel.grid(row=1, column=1, sticky="nsew", padx=(10, 0))
 
-        f0 = self._make_section(workflow_body, "0", "Pestañas de trabajo", "Cada pestaña es un tipo de actualización diferente.")
+        f0 = self._make_section(workflow_body, "1", "Pestañas de trabajo", "Cada pestaña es un tipo de actualización diferente.")
 
         self._module_notebook = ttk.Notebook(f0, style="Excel.TNotebook")
         self._module_notebook.pack(fill="x")
@@ -592,7 +576,7 @@ class PeruComprasGUI:
         )
         self._mode_help_lbl.pack(fill="x", pady=(10, 0))
 
-        f1 = self._make_section(workflow_body, "1", "Archivo de carga", "Carga tu Excel y revisa la validación antes de correr el bot cuando el módulo lo requiera.")
+        f1 = self._make_section(workflow_body, "2", "Archivo de carga", "Carga tu Excel y revisa la validación antes de correr el bot cuando el módulo lo requiera.")
 
         self._plazo_mode_frame = tk.Frame(f1, bg=self.C_SUPERFICIE)
         self._plazo_mode_title = tk.Label(
@@ -748,7 +732,19 @@ class PeruComprasGUI:
         )
         self._validation_examples_lbl.pack(anchor="w", pady=(6, 0))
 
-        f2 = self._make_section(workflow_body, "2", "Filtros del portal", "Trae las opciones desde Peru Compras o ajusta las predeterminadas según el modo seleccionado.")
+        self._preview_frame = tk.Frame(f1, bg=self.C_SUPERFICIE)
+        tk.Label(
+            self._preview_frame,
+            text="Vista previa (primeras 5 filas)",
+            bg=self.C_SUPERFICIE,
+            fg=self.C_TEXTO_SUAVE,
+            font=("Segoe UI", 8),
+            anchor="w",
+        ).pack(anchor="w", pady=(10, 4))
+        self._preview_tree = ttk.Treeview(self._preview_frame, show="headings", height=5)
+        self._preview_tree.pack(fill="x")
+
+        f2 = self._make_section(workflow_body, "3", "Filtros del portal", "Trae las opciones desde Peru Compras o ajusta las predeterminadas según el modo seleccionado.")
 
         aviso_f = tk.Frame(
             f2,
@@ -771,7 +767,7 @@ class PeruComprasGUI:
         ).pack(side="left", fill="x", expand=True)
         self.btn_cargar_opts = ttk.Button(
             aviso_f,
-            text="Traer opciones del portal",
+            text="Cargar filtros de Perú Compras",
             command=self._cargar_opciones,
             style="Secundario.TButton",
         )
@@ -831,7 +827,7 @@ class PeruComprasGUI:
         av_entry.pack(side="left", padx=8, pady=(4, 0))
         _Tooltip(av_entry, "Auméntalo si el portal responde lento o bloquea acciones seguidas.")
 
-        f3 = self._make_section(workflow_body, "3", "Ejecución", "La app solo arrancará cuando el Excel esté listo y los filtros estén completos.")
+        f3 = self._make_section(workflow_body, "4", "Ejecución", "La app solo arrancará cuando el Excel esté listo y los filtros estén completos.")
 
         self._execution_state_lbl = tk.Label(
             f3,
@@ -1093,7 +1089,7 @@ class PeruComprasGUI:
             wraplength=320,
         ).pack(anchor="w", pady=(6, 0))
 
-        ops_card = tk.Frame(
+        pre_card = tk.Frame(
             sidebar_body,
             bg=self.C_SUPERFICIE,
             highlightbackground=self.C_BORDE,
@@ -1101,38 +1097,76 @@ class PeruComprasGUI:
             padx=14,
             pady=12,
         )
-        ops_card.pack(fill="x", pady=(12, 0))
+        pre_card.pack(fill="x", pady=(12, 0))
         tk.Label(
-            ops_card,
-            text="Acciones rápidas",
+            pre_card,
+            text="Antes de ejecutar",
             bg=self.C_SUPERFICIE,
             fg=self.C_TEXTO,
             font=("Segoe UI Semibold", 10),
             anchor="w",
         ).pack(anchor="w")
-        ops_metrics = tk.Frame(ops_card, bg=self.C_SUPERFICIE)
-        ops_metrics.pack(fill="x", pady=(10, 2))
-        self._make_metric_card(ops_metrics, "Último reporte", self.metric_reporte_var, 0)
+        tk.Label(
+            pre_card,
+            text="Retoma una sesión guardada o guarda la configuración actual.",
+            bg=self.C_SUPERFICIE,
+            fg=self.C_TEXTO_SUAVE,
+            font=("Segoe UI", 8),
+            anchor="w",
+            justify="left",
+            wraplength=220,
+        ).pack(anchor="w", pady=(2, 8))
         ttk.Button(
-            ops_card,
-            text="Abrir último reporte",
-            command=self._abrir_reporte,
-            style="Secundario.TButton",
-        ).pack(fill="x", pady=(10, 6))
-        ttk.Button(
-            ops_card,
-            text="Guardar progreso",
-            command=self._guardar_progreso,
-            style="Secundario.TButton",
-        ).pack(fill="x", pady=(0, 6))
-        ttk.Button(
-            ops_card,
+            pre_card,
             text="Continuar desde progreso",
             command=self._cargar_progreso,
             style="Secundario.TButton",
         ).pack(fill="x", pady=(0, 6))
         ttk.Button(
-            ops_card,
+            pre_card,
+            text="Guardar progreso",
+            command=self._guardar_progreso,
+            style="Secundario.TButton",
+        ).pack(fill="x")
+
+        post_card = tk.Frame(
+            sidebar_body,
+            bg=self.C_SUPERFICIE,
+            highlightbackground=self.C_BORDE,
+            highlightthickness=1,
+            padx=14,
+            pady=12,
+        )
+        post_card.pack(fill="x", pady=(12, 0))
+        tk.Label(
+            post_card,
+            text="Después de ejecutar",
+            bg=self.C_SUPERFICIE,
+            fg=self.C_TEXTO,
+            font=("Segoe UI Semibold", 10),
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            post_card,
+            text="Revisa el reporte generado o analiza los errores de la sesión.",
+            bg=self.C_SUPERFICIE,
+            fg=self.C_TEXTO_SUAVE,
+            font=("Segoe UI", 8),
+            anchor="w",
+            justify="left",
+            wraplength=220,
+        ).pack(anchor="w", pady=(2, 8))
+        post_metrics = tk.Frame(post_card, bg=self.C_SUPERFICIE)
+        post_metrics.pack(fill="x", pady=(0, 8))
+        self._make_metric_card(post_metrics, "Último reporte", self.metric_reporte_var, 0)
+        ttk.Button(
+            post_card,
+            text="Abrir último reporte",
+            command=self._abrir_reporte,
+            style="Secundario.TButton",
+        ).pack(fill="x", pady=(0, 6))
+        ttk.Button(
+            post_card,
             text="Estadísticas de errores",
             command=self._ver_aprendizaje,
             style="Secundario.TButton",
@@ -1372,16 +1406,22 @@ class PeruComprasGUI:
         region    = self.region_var.get().strip()
         provincia = self.provincia_var.get().strip()
 
+        dropdowns_vacios = not acuerdo
+        if hasattr(self, "btn_cargar_opts"):
+            self.btn_cargar_opts.configure(
+                style="Accion.TButton" if dropdowns_vacios else "Secundario.TButton"
+            )
+
         if self._es_modo_cobertura():
             if not acuerdo:
-                self._guiar("Falta elegir un Acuerdo Marco.")
+                self._guiar("Los desplegables están vacíos — usa 'Cargar filtros de Perú Compras' para obtenerlos.")
             else:
                 self._guiar("Todo está correcto — puedes comenzar la automatización.")
         elif self._es_modo_plazo():
             if not self._es_plazo_individual():
                 plazo = self.plazo_general_var.get().strip()
                 if not acuerdo:
-                    self._guiar("Falta elegir un Acuerdo Marco.")
+                    self._guiar("Los desplegables están vacíos — usa 'Cargar filtros de Perú Compras' para obtenerlos.")
                 elif not catalogo:
                     self._guiar("Falta elegir un Catálogo.")
                 elif not categoria:
@@ -1392,7 +1432,7 @@ class PeruComprasGUI:
                     self._guiar("Todo está correcto — puedes comenzar la automatización.")
             else:
                 if not acuerdo:
-                    self._guiar("Falta elegir un Acuerdo Marco.")
+                    self._guiar("Los desplegables están vacíos — usa 'Cargar filtros de Perú Compras' para obtenerlos.")
                 elif not catalogo:
                     self._guiar("Falta elegir un Catálogo.")
                 elif not categoria:
@@ -1405,7 +1445,7 @@ class PeruComprasGUI:
                     self._guiar("Todo está correcto — puedes comenzar la automatización.")
         else:  # stock
             if not acuerdo:
-                self._guiar("Falta elegir un Acuerdo Marco.")
+                self._guiar("Los desplegables están vacíos — usa 'Cargar filtros de Perú Compras' para obtenerlos.")
             elif not catalogo:
                 self._guiar("Falta elegir un Catálogo.")
             elif not categoria:
@@ -1544,29 +1584,44 @@ class PeruComprasGUI:
             )
 
     def _actualizar_resumen_seleccion(self):
-        archivo = Path(self.excel_var.get().strip()).name if self.excel_var.get().strip() else "sin archivo"
-        acuerdo = self.acuerdo_var.get().strip() or "pendiente"
-        catalogo = self.catalogo_var.get().strip() or "pendiente"
-        categoria = self.categoria_var.get().strip() or "pendiente"
-        region = self.region_var.get().strip() or "pendiente"
-        provincia = self.provincia_var.get().strip() or "pendiente"
+        plazo_bloque = self._es_modo_plazo() and not self._es_plazo_individual()
+
+        excel_ok = plazo_bloque or (
+            bool(self.excel_var.get().strip())
+            and self.validation_summary is not None
+            and self.validation_summary.is_ready
+        )
+        archivo_txt = "— no requerido" if plazo_bloque else ("✓ listo" if excel_ok else "✗ no listo")
+
+        acuerdo   = self.acuerdo_var.get().strip()
+        catalogo  = self.catalogo_var.get().strip()
+        categoria = self.categoria_var.get().strip()
+        region    = self.region_var.get().strip()
+        provincia = self.provincia_var.get().strip()
         if self._es_modo_cobertura():
-            self.selection_summary_var.set(
-                f"Modo: Disponibilidad\nArchivo: {archivo}\nAcuerdo: {acuerdo}\nPlazo por archivo: sí\nPausa: {self.pausa_var.get().strip() or '2'} s"
-            )
+            filtros_ok = bool(acuerdo)
         elif self._es_modo_plazo():
-            if self._es_plazo_individual():
-                self.selection_summary_var.set(
-                    f"Modo: Tiempo de entrega\nSubmodo: Por artículos\nArchivo: {archivo}\nAcuerdo: {acuerdo}\nCatálogo: {catalogo}\nCategoría: {categoria}\nRegión: {region}\nProvincia: {provincia}\nPausa: {self.pausa_var.get().strip() or '2'} s"
-                )
-            else:
-                self.selection_summary_var.set(
-                    f"Modo: Tiempo de entrega\nSubmodo: Por bloque\nArchivo: no requerido\nAcuerdo: {acuerdo}\nCatálogo: {catalogo}\nCategoría: {categoria}\nRegión: {region}\nProvincia: {provincia}\nPlazo: {self.plazo_general_var.get().strip() or 'pendiente'} día(s)\nPausa: {self.pausa_var.get().strip() or '2'} s"
-                )
+            filtros_ok = bool(acuerdo and catalogo and categoria and region and provincia)
         else:
-            self.selection_summary_var.set(
-                f"Modo: Actualizar precios\nArchivo: {archivo}\nAcuerdo: {acuerdo}\nCatálogo: {catalogo}\nCategoría: {categoria}\nPausa: {self.pausa_var.get().strip() or '2'} s"
-            )
+            filtros_ok = bool(acuerdo and catalogo and categoria)
+        filtros_txt = "✓ completos" if filtros_ok else "✗ incompletos"
+
+        if self._es_modo_cobertura():
+            modo_txt = "Disponibilidad"
+        elif self._es_modo_plazo():
+            modo_txt = "Plazo — por bloque" if plazo_bloque else "Plazo — por artículos"
+        else:
+            modo_txt = "Actualizar precios"
+
+        listo = excel_ok and filtros_ok
+        listo_txt = "✓ sí" if listo else "✗ no"
+
+        self.selection_summary_var.set(
+            f"Archivo:           {archivo_txt}\n"
+            f"Filtros:             {filtros_txt}\n"
+            f"Modo:              {modo_txt}\n"
+            f"Listo para iniciar: {listo_txt}"
+        )
 
     def _actualizar_resumen_excel_ui(self, resumen):
         if self._es_modo_plazo() and not self._es_plazo_individual():
@@ -1588,6 +1643,7 @@ class PeruComprasGUI:
                 "info",
             )
             self._actualizar_guia_filtros()
+            self._preview_frame.pack_forget()
             # Sin Excel requerido: pasos 1 y 2 se marcan automáticamente como completados
             if self._paso_actual <= 2:
                 self._actualizar_stepper(3)
@@ -1597,6 +1653,7 @@ class PeruComprasGUI:
             self.metric_archivo_var.set("Sin archivo")
             self.metric_productos_var.set("0")
             self.metric_alertas_var.set("0")
+            self._preview_frame.pack_forget()
             self.quick_status_var.set("Sube tu archivo para comenzar")
             self._aplicar_estado_preparacion(
                 "Aún no está listo",
@@ -1611,6 +1668,7 @@ class PeruComprasGUI:
         self.metric_archivo_var.set(resumen.file_path.name)
         self.metric_productos_var.set(str(resumen.valid_rows))
         self.metric_alertas_var.set(str(resumen.total_problem_rows + len(resumen.warnings)))
+        self._actualizar_preview_excel(resumen.file_path)
         entidad = "región(es)" if self._es_modo_cobertura() else "producto(s)"
 
         if resumen.is_ready:
@@ -1740,6 +1798,127 @@ class PeruComprasGUI:
             self.progress["value"] = 0
             self._lbl_progreso.configure(text=estado_txt or "Preparando...")
             self.quick_status_var.set(estado_txt or "Preparando ejecución")
+
+    def _actualizar_preview_excel(self, file_path: Path):
+        tree = self._preview_tree
+        tree.delete(*tree.get_children())
+        try:
+            df = pd.read_excel(file_path, nrows=5, dtype=str).fillna("")
+            cols = list(df.columns)
+            tree["columns"] = cols
+            for col in cols:
+                tree.heading(col, text=col)
+                tree.column(col, width=max(80, min(160, len(col) * 9)), stretch=True)
+            for _, row in df.iterrows():
+                tree.insert("", "end", values=list(row))
+            self._preview_frame.pack(fill="x", pady=(0, 12))
+        except Exception:
+            self._preview_frame.pack_forget()
+
+    def _mostrar_error_estructurado(self, exc: Exception, detalle: str):
+        tipo = type(exc).__name__
+        msg = str(exc)
+
+        que_paso = f"{tipo}: {msg[:120]}" if msg else tipo
+        if "login" in msg.lower() or "session" in msg.lower():
+            que_hacer = "Cierra Chrome, vuelve a iniciar el proceso e inicia sesión cuando se abra."
+        elif "excel" in msg.lower() or "file" in msg.lower() or "path" in msg.lower():
+            que_hacer = "Verifica que el archivo Excel exista, no esté abierto en otro programa y tenga el formato correcto."
+        elif "timeout" in msg.lower() or "time" in msg.lower():
+            que_hacer = "Aumenta la pausa entre acciones y vuelve a intentar."
+        else:
+            que_hacer = "Revisa el log de actividad, corrige la causa indicada y vuelve a ejecutar."
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Error en la ejecución")
+        dlg.configure(bg="#FDECEA", padx=20, pady=18)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="Qué pasó", bg="#FDECEA", fg=self.C_PELIGRO,
+                 font=("Segoe UI Semibold", 10), anchor="w").pack(anchor="w")
+        tk.Label(dlg, text=que_paso, bg="#FDECEA", fg=self.C_TEXTO,
+                 font=("Segoe UI", 9), anchor="w", wraplength=440, justify="left").pack(anchor="w", pady=(2, 10))
+
+        tk.Label(dlg, text="Qué hacer ahora", bg="#FDECEA", fg=self.C_ADVERTENCIA,
+                 font=("Segoe UI Semibold", 10), anchor="w").pack(anchor="w")
+        tk.Label(dlg, text=que_hacer, bg="#FDECEA", fg=self.C_TEXTO,
+                 font=("Segoe UI", 9), anchor="w", wraplength=440, justify="left").pack(anchor="w", pady=(2, 12))
+
+        detalle_visible = tk.BooleanVar(value=False)
+        detalle_frame = tk.Frame(dlg, bg="#FDECEA")
+
+        def _toggle():
+            if detalle_visible.get():
+                txt_detalle.pack_forget()
+                btn_detalle.configure(text="▶ Ver detalle técnico")
+                detalle_visible.set(False)
+            else:
+                txt_detalle.pack(fill="x", pady=(4, 0))
+                btn_detalle.configure(text="▼ Ocultar detalle técnico")
+                detalle_visible.set(True)
+
+        btn_detalle = ttk.Button(detalle_frame, text="▶ Ver detalle técnico",
+                                 command=_toggle, style="Secundario.TButton")
+        btn_detalle.pack(anchor="w")
+        txt_detalle = scrolledtext.ScrolledText(detalle_frame, height=8, width=58,
+                                                font=("Consolas", 8), state="normal", wrap="word")
+        txt_detalle.insert("end", detalle)
+        txt_detalle.configure(state="disabled")
+        detalle_frame.pack(fill="x", pady=(0, 12))
+
+        ttk.Button(dlg, text="Cerrar", command=dlg.destroy, style="Accion.TButton").pack(fill="x")
+        dlg.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{x}+{y}")
+
+    def _mostrar_asistente_inicio(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("¿Qué quieres actualizar hoy?")
+        dlg.configure(bg=self.C_SUPERFICIE, padx=32, pady=28)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="¿Qué quieres actualizar hoy?",
+                 bg=self.C_SUPERFICIE, fg=self.C_TEXTO,
+                 font=("Segoe UI Semibold", 14)).pack(pady=(0, 6))
+        tk.Label(dlg, text="Elige el tipo de operación para configurar la sesión automáticamente.",
+                 bg=self.C_SUPERFICIE, fg=self.C_TEXTO_SUAVE,
+                 font=("Segoe UI", 9)).pack(pady=(0, 20))
+
+        opciones = [
+            (self.MODO_STOCK,     "Actualizar precios",  "Sube precios y stock desde un Excel."),
+            (self.MODO_COBERTURA, "Disponibilidad",       "Define regiones y tiempos de cobertura."),
+            (self.MODO_PLAZO,     "Tiempo de entrega",    "Establece plazos por artículo o en bloque."),
+        ]
+
+        def _elegir(modo):
+            keys = list(self._module_tabs.keys())
+            if modo in keys:
+                self._module_notebook.select(keys.index(modo))
+                self._on_tab_changed(None)
+            dlg.destroy()
+
+        for modo, titulo, desc in opciones:
+            btn_f = tk.Frame(dlg, bg=self.C_SUPERFICIE, highlightbackground=self.C_BORDE,
+                             highlightthickness=1, padx=16, pady=12, cursor="hand2")
+            btn_f.pack(fill="x", pady=5)
+            tk.Label(btn_f, text=titulo, bg=self.C_SUPERFICIE, fg=self.C_ACCION,
+                     font=("Segoe UI Semibold", 11), anchor="w").pack(anchor="w")
+            tk.Label(btn_f, text=desc, bg=self.C_SUPERFICIE, fg=self.C_TEXTO_SUAVE,
+                     font=("Segoe UI", 9), anchor="w").pack(anchor="w", pady=(2, 0))
+            _m = modo
+            btn_f.bind("<Button-1>", lambda e, m=_m: _elegir(m))
+            for child in btn_f.winfo_children():
+                child.bind("<Button-1>", lambda e, m=_m: _elegir(m))
+            btn_f.bind("<Enter>", lambda e, f=btn_f: f.configure(highlightbackground=self.C_ACCION))
+            btn_f.bind("<Leave>", lambda e, f=btn_f: f.configure(highlightbackground=self.C_BORDE))
+
+        dlg.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dlg.winfo_height()) // 2
+        dlg.geometry(f"+{x}+{y}")
 
     def _analizar_excel_actual(self, silencioso: bool = False):
         ruta = self.excel_var.get().strip()
@@ -1893,6 +2072,7 @@ class PeruComprasGUI:
     def _continuar_login(self):
         self.login_event.set()
         self.root.after(0, lambda: self._mostrar_panel_login(False))
+        self._actualizar_stepper(5)
         self._set_banner("Sesión confirmada — el bot continúa solo.", self.C_OK_BG, self.C_OK_FG)
         self.quick_status_var.set("Sesión confirmada, retomando automatización")
         self._guiar("Sesión confirmada. El bot está trabajando, no cierres la aplicación.")
@@ -2375,7 +2555,7 @@ class PeruComprasGUI:
         if self._es_modo_cobertura() and not acuerdo:
             messagebox.showerror(
                 "Filtros incompletos",
-                "Debes completar el Acuerdo Marco del Paso 2.\n\nUsa 'Traer opciones del portal' si el desplegable está vacío.",
+                "Debes completar el Acuerdo Marco del Paso 2.\n\nUsa 'Cargar filtros de Perú Compras' si el desplegable está vacío.",
             )
             return
         if self._es_modo_plazo() and (not acuerdo or not catalogo or not categoria or not region or not provincia):
@@ -2383,7 +2563,7 @@ class PeruComprasGUI:
                 "Filtros incompletos",
                 "Debes completar los filtros de plazo:\n"
                 "  • Acuerdo Marco\n  • Catálogo\n  • Categoría\n  • Región\n  • Provincia\n\n"
-                "Usa 'Traer opciones del portal' si necesitas traer las listas exactas.",
+                "Usa 'Cargar filtros de Perú Compras' si necesitas traer las listas exactas.",
             )
             return
         if not self._es_modo_cobertura() and not self._es_modo_plazo() and (not acuerdo or not catalogo or not categoria):
@@ -2391,7 +2571,7 @@ class PeruComprasGUI:
                 "Filtros incompletos",
                 "Debes completar los tres filtros del Paso 2:\n"
                 "  • Acuerdo Marco\n  • Catálogo\n  • Categoría\n\n"
-                "Usa 'Traer opciones del portal' si los desplegables están vacíos."
+                "Usa 'Cargar filtros de Perú Compras' si los desplegables están vacíos."
             )
             return
         try:
@@ -2422,11 +2602,18 @@ class PeruComprasGUI:
         self.btn_pausar.configure(text="Pausar")
         self._pausado = False
         self._actualizar_stepper(4)
-        self._set_banner("Se abrirá Chrome. Solo inicia sesión y vuelve aquí.", self.C_INFO_BG, self.C_INFO_FG)
+        if self._es_modo_plazo() and not self._es_plazo_individual():
+            registros_txt = "modo por bloque (sin conteo de filas)"
+        elif self.validation_summary is not None:
+            entidad = "región(es)" if self._es_modo_cobertura() else "producto(s)"
+            registros_txt = f"{self.validation_summary.valid_rows} {entidad}"
+        else:
+            registros_txt = "registros pendientes de conteo"
+        self._set_banner(f"Se procesarán {registros_txt} — se abrirá Chrome para iniciar sesión.", self.C_INFO_BG, self.C_INFO_FG)
         self.quick_status_var.set(f"Ejecutando automatización de {self._texto_operacion()}")
         self._aplicar_estado_preparacion(
             "Automatización en curso",
-            f"El bot está trabajando en {self._texto_operacion()}. Puedes pausar, detener o seguir el progreso desde esta pantalla.",
+            f"Se procesarán {registros_txt}. Puedes pausar, detener o seguir el progreso desde esta pantalla.",
             "info",
         )
         self._guiar("El bot está trabajando. Puedes pausarlo o detenerlo si necesitas.")
@@ -2516,7 +2703,8 @@ class PeruComprasGUI:
                 "error",
             ))
             self.root.after(0, lambda: self._guiar("Algo salió mal. Revisa el log de errores y vuelve a intentarlo."))
-            self.root.after(0, lambda: messagebox.showerror("Error inesperado", detalle))
+            _e, _d = e, detalle
+            self.root.after(0, lambda: self._mostrar_error_estructurado(_e, _d))
         finally:
             self.root.after(0, lambda: self.btn_iniciar.configure(state="normal"))
             self._pausado = False
