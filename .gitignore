@@ -34,3 +34,5 @@ desktop.ini
 *.xlsx
 wsp_server.json
 GUIA_NOTIFICACIONES_WSP.MD
+PeruComprasBot_Setup_1_4_1.exe
+# Archivo .exe ignorado por que GitHub no permite subir archivos binarios grandes, y el instalador se genera automáticamente en cada release. Si se necesita compartir el .exe.

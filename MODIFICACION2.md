@@ -127,3 +127,54 @@ El `messagebox.showerror` fue reemplazado por esta llamada.
 - Abrir último reporte
 - Estadísticas de errores
 - Subtítulo: "Revisa el reporte generado o analiza los errores de la sesión."
+
+---
+
+## 10. Stepper — paso "Configurar notif." añadido (WhatsApp)
+
+**Problema:** La tarjeta de notificaciones WhatsApp ya existía en la sección de Ejecución, pero el flujo guiado saltaba directamente de "Elegir opciones" a "Iniciar sesión", omitiendo ese paso.
+
+**Cambio:**
+
+- `pasos` amplió de 5 a 6 entradas: paso 4 = "Configurar notif.", paso 5 = "Iniciar sesión", paso 6 = "Ejecutar proceso".
+- `_actualizar_stepper` itera ahora sobre `range(6)`.
+- La tarjeta de progreso muestra "Paso X de 6".
+- `_actualizar_guia_filtros` avanza a `_actualizar_stepper(4)` cuando todos los filtros están completos y `_paso_actual == 3`.
+- El mensaje guía cambia a "Filtros listos — configura notificaciones WhatsApp o inicia directamente." cuando los filtros están completos.
+- `_iniciar` llama a `_actualizar_stepper(5)` (antes era 4) al abrir Chrome.
+- `_continuar_login` llama a `_actualizar_stepper(6)` (antes era 5) al confirmar sesión.
+
+---
+
+## 11. Stepper — flujos guiados para "Disponibilidad" y "Tiempo de entrega"
+
+**Problema:** El stepper solo existía para "Actualizar precios"; los modos "Disponibilidad" y "Tiempo de entrega" no tenían flujo guiado visual.
+
+**Cambio:**
+
+El sistema de stepper pasó de una sola lista `pasos` a cuatro **variantes independientes** almacenadas en `self._stepper_variants` (dict con claves `stock`, `cobertura`, `plazo_bloque`, `plazo_individual`). Cada variante contiene sus propios widgets de círculos, textos y separadores construidos dentro del mismo `_stepper_frame`.
+
+### Pasos por variante
+
+| Variante | Pasos |
+| --- | --- |
+| `stock` | Subir archivo Excel → Revisar datos → Elegir opciones → Configurar notif. → Iniciar sesión → Ejecutar proceso |
+| `cobertura` | Subir Excel → Revisar datos → Cargar filtros → Configurar notif. → Iniciar sesión → Ejecutar proceso |
+| `plazo_bloque` | Elegir filtros → Configurar notif. → Iniciar sesión → Ejecutar proceso |
+| `plazo_individual` | Subir Excel → Revisar datos → Elegir filtros → Configurar notif. → Iniciar sesión → Ejecutar proceso |
+
+### Métodos nuevos
+
+- `_get_stepper_variant_key()` — devuelve la clave de la variante activa según `operation_var` y `plazo_mode_var`.
+- `_paso_login()` — devuelve 3 (plazo_bloque) o 5 (resto).
+- `_paso_ejecutar()` — devuelve 4 (plazo_bloque) o 6 (resto).
+
+### Cambios en métodos existentes
+
+- `_build_stepper` — construye las 4 variantes; solo muestra `stock` al inicio; guarda `_last_stepper_variant = "stock"`.
+- `_actualizar_stepper` — opera sobre la variante activa; `metric_progreso_var` muestra `"Paso X de N"` usando el `total` de la variante.
+- `_aplicar_modo_operacion_ui` — muestra `_stepper_frame` para todos los modos; al cambiar de variante (`current_key != _last_stepper_variant`) resetea a paso 1.
+- `_actualizar_guia_filtros` — para `plazo_bloque` avanza paso 1 → 2 cuando los filtros están completos; para el resto mantiene paso 3 → 4.
+- `_actualizar_resumen_excel_ui` — eliminada la llamada `_actualizar_stepper(3)` en el bloque de plazo_bloque (no aplica a esa variante).
+- `_iniciar` — usa `_actualizar_stepper(self._paso_login())` en vez de valor fijo 5.
+- `_continuar_login` — usa `_actualizar_stepper(self._paso_ejecutar())` en vez de valor fijo 6.

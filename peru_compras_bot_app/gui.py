@@ -177,7 +177,7 @@ class PeruComprasGUI:
         self.metric_productos_var = tk.StringVar(value="0")
         self.metric_alertas_var = tk.StringVar(value="0")
         self.metric_portal_var = tk.StringVar(value="Sin importar")
-        self.metric_progreso_var = tk.StringVar(value="Paso 1 de 4")
+        self.metric_progreso_var = tk.StringVar(value="Paso 1 de 6")
         self.metric_reporte_var = tk.StringVar(value="Sin reporte")
         self.selection_summary_var = tk.StringVar(
             value="Aún no hay una configuración lista para ejecutar."
@@ -298,9 +298,7 @@ class PeruComprasGUI:
         C_BG = "#EEF2F7"
         stepper = tk.Frame(self.root, bg=C_BG, padx=24, pady=10)
         stepper.grid(row=2, column=0, sticky="ew")
-
-        inner = tk.Frame(stepper, bg=C_BG)
-        inner.pack(side="left")
+        self._stepper_frame = stepper
 
         tk.Label(
             stepper,
@@ -310,71 +308,114 @@ class PeruComprasGUI:
             font=("Segoe UI", 9),
         ).pack(side="left", padx=(0, 14))
 
-        self._step_circles: list = []
-        self._step_texts:  list = []
-        self._step_seps:   list = []
+        self._stepper_variants: dict = {}
+        self._last_stepper_variant: str = ""
 
-        pasos = [
-            ("1", "Subir archivo Excel"),
-            ("2", "Revisar datos"),
-            ("3", "Elegir opciones"),
-            ("4", "Iniciar sesión"),
-            ("5", "Ejecutar proceso"),
-        ]
+        variantes = {
+            "stock": [
+                ("1", "Subir archivo Excel"),
+                ("2", "Revisar datos"),
+                ("3", "Elegir opciones"),
+                ("4", "Configurar notif."),
+                ("5", "Iniciar sesión"),
+                ("6", "Ejecutar proceso"),
+            ],
+            "cobertura": [
+                ("1", "Subir Excel"),
+                ("2", "Revisar datos"),
+                ("3", "Cargar filtros"),
+                ("4", "Configurar notif."),
+                ("5", "Iniciar sesión"),
+                ("6", "Ejecutar proceso"),
+            ],
+            "plazo_bloque": [
+                ("1", "Elegir filtros"),
+                ("2", "Configurar notif."),
+                ("3", "Iniciar sesión"),
+                ("4", "Ejecutar proceso"),
+            ],
+            "plazo_individual": [
+                ("1", "Subir Excel"),
+                ("2", "Revisar datos"),
+                ("3", "Elegir filtros"),
+                ("4", "Configurar notif."),
+                ("5", "Iniciar sesión"),
+                ("6", "Ejecutar proceso"),
+            ],
+        }
 
-        for i, (num, titulo) in enumerate(pasos):
-            if i > 0:
-                sep = tk.Frame(inner, bg=self.C_BORDE, width=38, height=2)
-                sep.pack(side="left", padx=2, pady=0)
-                sep.pack_propagate(False)
-                self._step_seps.append(sep)
-            else:
-                self._step_seps.append(None)
-
-            wrap = tk.Frame(inner, bg=C_BG)
-            wrap.pack(side="left", padx=4)
-
-            circle = tk.Label(
-                wrap,
-                text=num,
-                bg=self.C_STEP_IDLE,
-                fg="#FFFFFF",
-                font=("Segoe UI Semibold", 9),
-                width=3,
-                pady=3,
-            )
-            circle.pack()
-
-            lbl = tk.Label(
-                wrap,
-                text=titulo,
-                bg=C_BG,
-                fg=self.C_STEP_IDLE,
-                font=("Segoe UI", 8),
-            )
-            lbl.pack()
-
-            self._step_circles.append(circle)
-            self._step_texts.append(lbl)
+        for variant_key, pasos in variantes.items():
+            inner = tk.Frame(stepper, bg=C_BG)
+            circles, texts, seps = [], [], []
+            for i, (num, titulo) in enumerate(pasos):
+                if i > 0:
+                    sep = tk.Frame(inner, bg=self.C_BORDE, width=38, height=2)
+                    sep.pack(side="left", padx=2, pady=0)
+                    sep.pack_propagate(False)
+                    seps.append(sep)
+                else:
+                    seps.append(None)
+                wrap = tk.Frame(inner, bg=C_BG)
+                wrap.pack(side="left", padx=4)
+                circle = tk.Label(
+                    wrap, text=num, bg=self.C_STEP_IDLE, fg="#FFFFFF",
+                    font=("Segoe UI Semibold", 9), width=3, pady=3,
+                )
+                circle.pack()
+                lbl = tk.Label(
+                    wrap, text=titulo, bg=C_BG,
+                    fg=self.C_STEP_IDLE, font=("Segoe UI", 8),
+                )
+                lbl.pack()
+                circles.append(circle)
+                texts.append(lbl)
+            self._stepper_variants[variant_key] = {
+                "frame": inner, "circles": circles, "texts": texts,
+                "seps": seps, "total": len(pasos),
+            }
+            if variant_key == "stock":
+                inner.pack(side="left")
 
         self._paso_actual = 1
+        self._last_stepper_variant = "stock"
         self._actualizar_stepper(1)
 
+    def _get_stepper_variant_key(self) -> str:
+        if self._es_modo_cobertura():
+            return "cobertura"
+        if self._es_modo_plazo():
+            return "plazo_bloque" if not self._es_plazo_individual() else "plazo_individual"
+        return "stock"
+
+    def _paso_login(self) -> int:
+        """Número de paso para 'Iniciar sesión' según modo activo."""
+        return 3 if (self._es_modo_plazo() and not self._es_plazo_individual()) else 5
+
+    def _paso_ejecutar(self) -> int:
+        """Número de paso para 'Ejecutar proceso' según modo activo."""
+        return 4 if (self._es_modo_plazo() and not self._es_plazo_individual()) else 6
+
     def _actualizar_stepper(self, paso: int):
-        """Actualiza los indicadores visuales de los pasos.
-        paso 1-5 = paso activo actual; 0 = todos completados.
+        """Actualiza los indicadores de la variante activa.
+        paso 1-N = paso activo; 0 = todos completados.
         """
-        if not hasattr(self, "_step_circles"):
+        if not hasattr(self, "_stepper_variants"):
             return
         self._paso_actual = paso
-        for i in range(5):
+        variant = self._stepper_variants.get(self._get_stepper_variant_key())
+        if not variant:
+            return
+        circles = variant["circles"]
+        texts   = variant["texts"]
+        seps    = variant["seps"]
+        total   = variant["total"]
+
+        for i in range(total):
             step_num = i + 1
             done   = (paso == 0) or (step_num < paso)
             active = (step_num == paso)
-
-            circle = self._step_circles[i]
-            lbl    = self._step_texts[i]
-
+            circle = circles[i]
+            lbl    = texts[i]
             if done:
                 circle.configure(bg=self.C_STEP_DONE, text="✓")
                 lbl.configure(fg=self.C_STEP_DONE, font=("Segoe UI Semibold", 8))
@@ -384,19 +425,16 @@ class PeruComprasGUI:
             else:
                 circle.configure(bg=self.C_STEP_IDLE, text=str(step_num))
                 lbl.configure(fg=self.C_STEP_IDLE, font=("Segoe UI", 8))
-
-            # Línea separadora (existe solo para i > 0)
-            sep = self._step_seps[i]
+            sep = seps[i]
             if sep is not None:
                 sep_done = (paso == 0) or (step_num <= paso)
                 sep.configure(bg=self.C_STEP_DONE if sep_done else self.C_BORDE)
 
-        # Actualizar tarjeta de progreso en el encabezado
         if hasattr(self, "metric_progreso_var"):
             if paso == 0:
                 self.metric_progreso_var.set("Completado ✓")
             else:
-                self.metric_progreso_var.set(f"Paso {paso} de 5")
+                self.metric_progreso_var.set(f"Paso {paso} de {total}")
 
     # ------------------------------------------------------------------
     # Construcción de la UI
@@ -671,7 +709,10 @@ class PeruComprasGUI:
         self._plazo_bloque_hint_lbl.pack(fill="x", pady=(6, 0))
         self._plazo_bloque_frame.pack(fill="x", pady=(0, 12))
 
-        fila_excel = ttk.Frame(f1)
+        self._excel_section_frame = tk.Frame(f1, bg=self.C_SUPERFICIE)
+        self._excel_section_frame.pack(fill="x")
+
+        fila_excel = ttk.Frame(self._excel_section_frame)
         fila_excel.pack(fill="x", pady=(0, 8))
         fila_excel.columnconfigure(0, weight=1)
         self._excel_row_frame = fila_excel
@@ -687,7 +728,7 @@ class PeruComprasGUI:
         btn_sel.grid(row=0, column=1)
         _Tooltip(btn_sel, "Selecciona un Excel .xlsx o .xls. La estructura depende del módulo activo.")
 
-        actions_file = tk.Frame(f1, bg=self.C_SUPERFICIE)
+        actions_file = tk.Frame(self._excel_section_frame, bg=self.C_SUPERFICIE)
         actions_file.pack(fill="x")
         ttk.Button(
             actions_file,
@@ -703,7 +744,7 @@ class PeruComprasGUI:
         ).pack(side="left", padx=(8, 0))
 
         tk.Label(
-            f1,
+            self._excel_section_frame,
             text="Revisamos tu Excel antes de ejecutar para evitar errores.",
             bg=self.C_SUPERFICIE,
             fg=self.C_TEXTO_SUAVE,
@@ -712,7 +753,7 @@ class PeruComprasGUI:
         ).pack(fill="x", pady=(10, 0))
 
         self._validation_box = tk.Frame(
-            f1,
+            self._excel_section_frame,
             bg=self.C_SUPERFICIE_2,
             highlightbackground=self.C_BORDE,
             highlightthickness=1,
@@ -752,7 +793,7 @@ class PeruComprasGUI:
         )
         self._validation_examples_lbl.pack(anchor="w", pady=(6, 0))
 
-        self._preview_frame = tk.Frame(f1, bg=self.C_SUPERFICIE)
+        self._preview_frame = tk.Frame(self._excel_section_frame, bg=self.C_SUPERFICIE)
         tk.Label(
             self._preview_frame,
             text="Vista previa (primeras 5 filas)",
@@ -1522,11 +1563,12 @@ class PeruComprasGUI:
                 style="Accion.TButton" if dropdowns_vacios else "Secundario.TButton"
             )
 
+        filtros_ok = False
         if self._es_modo_cobertura():
             if not acuerdo:
                 self._guiar("Los desplegables están vacíos — usa 'Cargar filtros de Perú Compras' para obtenerlos.")
             else:
-                self._guiar("Todo está correcto — puedes comenzar la automatización.")
+                filtros_ok = True
         elif self._es_modo_plazo():
             if not self._es_plazo_individual():
                 plazo = self.plazo_general_var.get().strip()
@@ -1539,7 +1581,7 @@ class PeruComprasGUI:
                 elif not plazo:
                     self._guiar("Falta ingresar el plazo general (días).")
                 else:
-                    self._guiar("Todo está correcto — puedes comenzar la automatización.")
+                    filtros_ok = True
             else:
                 if not acuerdo:
                     self._guiar("Los desplegables están vacíos — usa 'Cargar filtros de Perú Compras' para obtenerlos.")
@@ -1552,7 +1594,7 @@ class PeruComprasGUI:
                 elif not provincia:
                     self._guiar("Falta elegir una Provincia.")
                 else:
-                    self._guiar("Todo está correcto — puedes comenzar la automatización.")
+                    filtros_ok = True
         else:  # stock
             if not acuerdo:
                 self._guiar("Los desplegables están vacíos — usa 'Cargar filtros de Perú Compras' para obtenerlos.")
@@ -1561,7 +1603,14 @@ class PeruComprasGUI:
             elif not categoria:
                 self._guiar("Falta elegir una Categoría.")
             else:
-                self._guiar("Todo está correcto — puedes comenzar la automatización.")
+                filtros_ok = True
+
+        if filtros_ok:
+            self._guiar("Filtros listos — configura notificaciones WhatsApp o inicia directamente.")
+            if self._es_modo_plazo() and not self._es_plazo_individual() and self._paso_actual == 1:
+                self._actualizar_stepper(2)
+            elif self._paso_actual == 3:
+                self._actualizar_stepper(4)
 
     def _aplicar_estado_preparacion(self, titulo: str, detalle: str, tono: str = "info"):
         tonos = {
@@ -1633,6 +1682,26 @@ class PeruComprasGUI:
     def _aplicar_modo_operacion_ui(self):
         self._plazo_mode_frame.pack_forget()
         self._plazo_bloque_frame.pack_forget()
+        es_bloque = self._es_modo_plazo() and not self._es_plazo_individual()
+        if es_bloque:
+            self._excel_section_frame.pack_forget()
+        else:
+            self._excel_section_frame.pack(fill="x")
+
+        # Stepper visible para todos los modos; mostrar variante correcta
+        if hasattr(self, "_stepper_frame") and hasattr(self, "_stepper_variants"):
+            self._stepper_frame.grid(row=2, column=0, sticky="ew")
+            current_key = self._get_stepper_variant_key()
+            for key, variant in self._stepper_variants.items():
+                if key == current_key:
+                    variant["frame"].pack(side="left")
+                else:
+                    variant["frame"].pack_forget()
+            if current_key != self._last_stepper_variant:
+                self._last_stepper_variant = current_key
+                self._paso_actual = 1
+                self._actualizar_stepper(1)
+
         self._mostrar_combo(self.combo_catalogo, not self._es_modo_cobertura())
         self._mostrar_combo(self.combo_categoria, not self._es_modo_cobertura())
         self._mostrar_combo(self.combo_region, self._es_modo_plazo())
@@ -1653,7 +1722,12 @@ class PeruComprasGUI:
                 self.C_INFO_FG,
             )
         elif self._es_modo_plazo():
-            self._plazo_mode_frame.pack(fill="x", pady=(0, 12), before=self._excel_row_frame)
+            # En bloque, excel_section está oculto → no usar before= sobre él
+            if es_bloque:
+                self._plazo_mode_frame.pack(fill="x", pady=(0, 12))
+                self._plazo_bloque_frame.pack(fill="x", pady=(0, 12))
+            else:
+                self._plazo_mode_frame.pack(fill="x", pady=(0, 12), before=self._excel_section_frame)
             if self._es_plazo_individual():
                 self._mode_help_lbl.configure(
                     text="Usa 'Tiempo de entrega' por artículos para buscar por número de parte y aplicar el plazo de cada fila del Excel."
@@ -1670,7 +1744,6 @@ class PeruComprasGUI:
                 self._filter_mode_note_lbl.configure(
                     text="Necesitas los filtros. No se requiere Excel."
                 )
-                self._plazo_bloque_frame.pack(fill="x", pady=(0, 12), before=self._excel_row_frame)
                 self.btn_iniciar.configure(text="Comenzar automatización")
             self.quick_status_var.set("Modo plazo seleccionado")
             self._set_banner(
@@ -1754,9 +1827,6 @@ class PeruComprasGUI:
             )
             self._actualizar_guia_filtros()
             self._preview_frame.pack_forget()
-            # Sin Excel requerido: pasos 1 y 2 se marcan automáticamente como completados
-            if self._paso_actual <= 2:
-                self._actualizar_stepper(3)
             return
 
         if resumen is None:
@@ -2270,7 +2340,7 @@ class PeruComprasGUI:
     def _continuar_login(self):
         self.login_event.set()
         self.root.after(0, lambda: self._mostrar_panel_login(False))
-        self._actualizar_stepper(5)
+        self._actualizar_stepper(self._paso_ejecutar())
         self._set_banner("Sesión confirmada — el bot continúa solo.", self.C_OK_BG, self.C_OK_FG)
         self.quick_status_var.set("Sesión confirmada, retomando automatización")
         self._guiar("Sesión confirmada. El bot está trabajando, no cierres la aplicación.")
@@ -2862,7 +2932,7 @@ class PeruComprasGUI:
         self.btn_iniciar.configure(state="disabled")
         self.btn_pausar.configure(text="Pausar")
         self._pausado = False
-        self._actualizar_stepper(4)
+        self._actualizar_stepper(self._paso_login())
         if self._es_modo_plazo() and not self._es_plazo_individual():
             registros_txt = "modo por bloque (sin conteo de filas)"
         elif self.validation_summary is not None:
