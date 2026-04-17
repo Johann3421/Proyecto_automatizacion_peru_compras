@@ -1844,6 +1844,11 @@ def paso4_actualizar_plazo_individual(
             break
 
         _esperar_controles_ejecucion()
+        # Verificar sesión activa y página correcta (cubre re-login tras pausa o crash)
+        _asegurar_sesion_y_pagina(driver, MEJORA_PLAZO_URL)
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            break
+
         parte = str(fila["Parte"]).strip()
         plazo = int(fila["Plazo"])
         log.info(f"\n--- Producto {int(idx) + 1}/{total}: Parte={parte}, Plazo={plazo} ---")
@@ -1893,9 +1898,9 @@ def paso4_actualizar_plazo_individual(
             try:
                 recuperar_estado_plazo(driver)
             except Exception:
-                log.warning("  No se pudo recuperar estado en plazo. Recargando página...")
-                driver.get(MEJORA_PLAZO_URL)
-                _sleep_controlado(3)
+                pass
+            # Verificar y restaurar página/sesión siempre
+            _asegurar_sesion_y_pagina(driver, MEJORA_PLAZO_URL)
 
         if DETENER_EVENTO and DETENER_EVENTO.is_set():
             break
@@ -2023,6 +2028,11 @@ def paso4_actualizar_cobertura(driver, df: pd.DataFrame):
         if DETENER_EVENTO and DETENER_EVENTO.is_set():
             break
 
+        # Verificar sesión activa y página correcta (cubre re-login tras pausa o crash)
+        _asegurar_sesion_y_pagina(driver, MEJORA_COBERTURA_URL, paso3_filtros_cobertura)
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            break
+
         region = str(fila["Region"]).strip()
         plazo = int(fila["Plazo"])
         log.info(f"\n--- Región {int(idx) + 1}/{total}: Región={region}, Plazo={plazo} ---")
@@ -2058,10 +2068,9 @@ def paso4_actualizar_cobertura(driver, df: pd.DataFrame):
             try:
                 recuperar_estado_cobertura(driver)
             except Exception:
-                log.warning("  No se pudo recuperar estado en cobertura. Recargando página...")
-                driver.get(MEJORA_COBERTURA_URL)
-                time.sleep(3)
-                paso3_filtros_cobertura(driver)
+                pass
+            # Verificar y restaurar página/sesión siempre
+            _asegurar_sesion_y_pagina(driver, MEJORA_COBERTURA_URL, paso3_filtros_cobertura)
 
         if DETENER_EVENTO and DETENER_EVENTO.is_set():
             break
@@ -2150,6 +2159,11 @@ def paso4_actualizar_stock(driver, df: pd.DataFrame):
         if DETENER_EVENTO and DETENER_EVENTO.is_set():
             break
 
+        # Verificar sesión activa y página correcta (cubre re-login tras pausa o crash)
+        _asegurar_sesion_y_pagina(driver, MEJORA_URL, paso3_filtros)
+        if DETENER_EVENTO and DETENER_EVENTO.is_set():
+            break
+
         parte = str(fila["Parte"]).strip()
         stock = str(int(fila["Stock"]))
         log.info(f"\n--- Producto {int(idx) + 1}/{total}: Parte={parte}, Stock={stock} ---")
@@ -2178,10 +2192,10 @@ def paso4_actualizar_stock(driver, df: pd.DataFrame):
                     try:
                         recuperar_estado(driver)
                     except Exception:
-                        log.warning("  No se pudo recuperar estado. Recargando pagina...")
-                        driver.get(MEJORA_URL)
-                        time.sleep(3)
-                        paso3_filtros(driver)
+                        pass
+                    # Verificar y restaurar página/sesión siempre (no depender de que
+                    # recuperar_estado falle — la sesión puede expirar silenciosamente)
+                    _asegurar_sesion_y_pagina(driver, MEJORA_URL, paso3_filtros)
                     _sleep_controlado(3)
 
         if not resultado_registrado and ultimo_error is not None:
@@ -2198,10 +2212,8 @@ def paso4_actualizar_stock(driver, df: pd.DataFrame):
             try:
                 recuperar_estado(driver)
             except Exception:
-                log.warning("  No se pudo recuperar estado. Recargando pagina...")
-                driver.get(MEJORA_URL)
-                time.sleep(3)
-                paso3_filtros(driver)
+                pass
+            _asegurar_sesion_y_pagina(driver, MEJORA_URL, paso3_filtros)
 
         if DETENER_EVENTO and DETENER_EVENTO.is_set():
             break
@@ -2230,6 +2242,88 @@ def _sleep_controlado(segundos: int | float):
             return
         _esperar_controles_ejecucion()
         time.sleep(0.2)
+
+
+# ---------------------------------------------------------------------------
+# DETECCIÓN Y RESTAURACIÓN DE SESIÓN EXPIRADA
+# ---------------------------------------------------------------------------
+def _esta_en_modulo(driver, url_modulo: str) -> bool:
+    """True si el driver está en la página del módulo con sesión activa."""
+    try:
+        current = driver.current_url
+        if not current or "AccesoGeneral" in current:
+            return False
+        # Extraer el primer segmento de ruta del módulo (ej: "MejoraBasica")
+        modulo_seg = url_modulo.replace(BASE_URL, "").lstrip("/").split("/")[0]
+        return modulo_seg in current
+    except Exception:
+        return False
+
+
+def _esperar_relogin_gui():
+    """Notifica al usuario que debe re-iniciar sesión y espera su confirmación."""
+    if MODO_GUI and EVENTO_LOGIN is not None:
+        log.warning("[SESIÓN] Mostrando panel de re-login en la interfaz...")
+        if GUI_NOTIFICAR_LOGIN:
+            GUI_NOTIFICAR_LOGIN()
+        EVENTO_LOGIN.clear()
+        EVENTO_LOGIN.wait()
+        log.info("[SESIÓN] Re-login confirmado por el usuario.")
+    else:
+        input(
+            ">>> La sesión expiró. Vuelve a iniciar sesión en el navegador "
+            "y presiona ENTER para continuar..."
+        )
+
+
+def _asegurar_sesion_y_pagina(driver, url_modulo: str, paso3_func=None):
+    """
+    Verifica que el driver esté en el módulo correcto con sesión activa.
+    Si detecta sesión expirada o página fuera del módulo:
+      1. Intenta navegar directamente a url_modulo.
+      2. Si redirige al login, espera que el usuario re-inicie sesión.
+      3. Luego vuelve a navegar al módulo y llama a paso3_func para
+         re-aplicar los filtros.
+    No hace nada si todo está bien.
+    """
+    if _esta_en_modulo(driver, url_modulo):
+        return  # OK, no hace falta nada
+
+    try:
+        current = driver.current_url
+    except Exception:
+        current = "(inaccesible)"
+    log.warning(
+        f"[SESIÓN] Página incorrecta ({current!r}). Intentando restaurar sesión..."
+    )
+
+    # Intentar ir directamente al módulo
+    try:
+        driver.get(url_modulo)
+        time.sleep(3)
+    except Exception:
+        pass
+
+    # Si nos redirigió al login, esperar re-autenticación del usuario
+    if not _esta_en_modulo(driver, url_modulo):
+        log.warning("[SESIÓN] Sesión expirada. Esperando re-login del usuario...")
+        _esperar_relogin_gui()
+        # Después del re-login el usuario está en el home; navegar al módulo directamente
+        try:
+            driver.get(url_modulo)
+            time.sleep(3)
+        except Exception:
+            pass
+
+    # Re-aplicar filtros si se proporcionó función
+    if paso3_func is not None:
+        try:
+            paso3_func(driver)
+            log.info("[SESIÓN] Sesión restablecida y filtros reaplicados correctamente.")
+        except Exception as ef:
+            log.error(f"[SESIÓN] Error al reaplicar filtros tras restaurar sesión: {ef}")
+    else:
+        log.info("[SESIÓN] Sesión restablecida. Los filtros serán reaplicados en la siguiente operación.")
 
 
 def _buscar_filas_resultado(driver, timeout=WAIT_NORMAL):

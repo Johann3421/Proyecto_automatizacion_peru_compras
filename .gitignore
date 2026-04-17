@@ -32,3 +32,5 @@ desktop.ini
 # ── VS Code ───────────────────────────────────────────────────
 .vscode/
 *.xlsx
+wsp_server.json
+GUIA_NOTIFICACIONES_WSP.MD

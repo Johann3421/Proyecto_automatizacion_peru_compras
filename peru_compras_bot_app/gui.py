@@ -13,6 +13,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from peru_compras_bot_app import automation as bot
+from peru_compras_bot_app import notificaciones as notif
 
 
 log = bot.log
@@ -139,7 +140,15 @@ class PeruComprasGUI:
         self._portal_snapshot = {"acuerdos": 0, "catalogos": 0, "categorias": 0}
         # Caché completa: {catalogo_nombre: [categoria1, ...]} para poblar la cascada sin re-importar
         self._catalogo_categorias_map: dict = {}
+        # Caché acuerdo→lista de catálogos para repoblar el combo al cambiar de acuerdo
+        self._acuerdo_catalogo_map: dict = {}
         self._progress_file = bot.BASE_DIR / "progreso_guardado.json"
+        # Archivo de caché de opciones del portal (persiste entre sesiones)
+        self._portal_cache_file = bot.BASE_DIR / "portal_cache.json"
+        self._wsp_config_file = bot.BASE_DIR / "wsp_config.json"
+        self._wsp_server_file = bot.BASE_DIR / "wsp_server.json"
+        notif.set_config_path(self._wsp_config_file)
+        notif.set_server_path(self._wsp_server_file)
 
         self.operation_var = tk.StringVar(value=self.MODO_STOCK)
         self.plazo_mode_var = tk.StringVar(value=self.PLAZO_BLOQUE)
@@ -151,6 +160,13 @@ class PeruComprasGUI:
         self.provincia_var = tk.StringVar(value="")
         self.plazo_general_var = tk.StringVar(value="5")
         self.pausa_var    = tk.StringVar(value=str(bot.PAUSA_ENTRE_PRODUCTOS))
+        # Notificaciones WhatsApp
+        # wsp_phone_var almacena el número completo (ej: 51987654321)
+        self.wsp_phone_var        = tk.StringVar(value="")
+        # wsp_phone_suffix_var es solo los dígitos después del prefijo 51 (para el campo de entrada)
+        self.wsp_phone_suffix_var = tk.StringVar(value="")
+        self.wsp_notif_fin_var    = tk.BooleanVar(value=True)
+        self.wsp_notif_error_var  = tk.BooleanVar(value=True)
         self.estado_var   = tk.StringVar(value="")
         self.readiness_var = tk.StringVar(value="Aún no está listo")
         self.readiness_detail_var = tk.StringVar(
@@ -169,21 +185,25 @@ class PeruComprasGUI:
         self.quick_status_var = tk.StringVar(value="Esperando configuración")
 
         self._apply_theme()
+        self._cargar_wsp_config()
         self._build_ui()
         self._configurar_logging_gui()
         self._tick_logs()
         self._analizar_excel_actual(silencioso=True)
-        # Pre-rellenar combos con opciones del portal precargadas (no requiere importar)
-        _pd = bot.PORTAL_DEFAULTS
-        _cat_map = _pd["categoria_por_catalogo"]
-        _acuerdo0 = _pd["acuerdos"][0] if _pd["acuerdos"] else bot.ACUERDO_TEXTO
-        _catalogos0 = _pd["catalogo_por_acuerdo"].get(_acuerdo0, [bot.CATALOGO_TEXTO])
-        _cat0 = _cat_map.get(bot.CATALOGO_TEXTO, [bot.CATEGORIA_TEXTO])
+        # Pre-rellenar combos: usar caché del portal si existe, si no usar PORTAL_DEFAULTS
+        _cached_portal = self._cargar_portal_cache()
+        _pd = _cached_portal if _cached_portal else bot.PORTAL_DEFAULTS
+        _cat_map = _pd.get("categoria_por_catalogo", bot.PORTAL_DEFAULTS["categoria_por_catalogo"])
+        _acuerdo_cat_map = _pd.get("catalogo_por_acuerdo", bot.PORTAL_DEFAULTS["catalogo_por_acuerdo"])
+        _acuerdo0 = _pd["acuerdos"][0] if _pd.get("acuerdos") else bot.ACUERDO_TEXTO
+        _catalogos0 = _acuerdo_cat_map.get(_acuerdo0, list(_acuerdo_cat_map.values())[0] if _acuerdo_cat_map else [bot.CATALOGO_TEXTO])
+        _cat0 = _cat_map.get(bot.CATALOGO_TEXTO, list(_cat_map.values())[0] if _cat_map else [bot.CATEGORIA_TEXTO])
         self._actualizar_combos(
-            _pd["acuerdos"],
+            _pd.get("acuerdos", bot.PORTAL_DEFAULTS["acuerdos"]),
             _catalogos0,
             _cat0,
             catalogo_categorias_map=_cat_map,
+            acuerdo_catalogo_map=_acuerdo_cat_map,
             silencioso=True,
         )
         self._actualizar_resumen_seleccion()
@@ -838,6 +858,96 @@ class PeruComprasGUI:
             anchor="w",
         )
         self._execution_state_lbl.pack(fill="x", pady=(0, 8))
+
+        # --- Tarjeta Notificaciones WhatsApp ---
+        srv_ok = notif.servidor_configurado()
+        wsp_card_bg = "#F0FDF4" if srv_ok else "#FFFBEB"
+        wsp_card_border = "#86EFAC" if srv_ok else "#FCD34D"
+        wsp_card = tk.Frame(
+            f3,
+            bg=wsp_card_bg,
+            highlightbackground=wsp_card_border,
+            highlightthickness=1,
+            padx=12,
+            pady=10,
+        )
+        wsp_card.pack(fill="x", pady=(0, 10))
+
+        # Cabecera de la tarjeta
+        wsp_header = tk.Frame(wsp_card, bg=wsp_card_bg)
+        wsp_header.pack(fill="x", anchor="w")
+        tk.Label(
+            wsp_header,
+            text="📱 Notificaciones WhatsApp",
+            bg=wsp_card_bg,
+            fg=self.C_HEADER,
+            font=("Segoe UI Semibold", 9),
+        ).pack(side="left")
+        srv_badge_text = "  ✅ Servidor listo" if srv_ok else "  ⚠️ Sin servidor (contacta al administrador)"
+        srv_badge_fg = self.C_OK_FG if srv_ok else "#92400E"
+        tk.Label(
+            wsp_header,
+            text=srv_badge_text,
+            bg=wsp_card_bg,
+            fg=srv_badge_fg,
+            font=("Segoe UI", 8),
+        ).pack(side="left", padx=(8, 0))
+
+        # Fila del teléfono con prefijo +51 fijo
+        phone_row = tk.Frame(wsp_card, bg=wsp_card_bg)
+        phone_row.pack(fill="x", anchor="w", pady=(8, 0))
+        tk.Label(
+            phone_row,
+            text="Tu número de WhatsApp:",
+            bg=wsp_card_bg,
+            fg=self.C_TEXTO,
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(0, 8))
+        # Prefijo fijo +51
+        tk.Label(
+            phone_row,
+            text="+51",
+            bg=wsp_card_bg,
+            fg=self.C_TEXTO_SUAVE,
+            font=("Segoe UI Semibold", 9),
+        ).pack(side="left")
+        # Validación: solo dígitos, máx 9
+        _vcmd = (self.root.register(lambda s: s.isdigit() and len(s) <= 9 or s == ""), "%P")
+        e_phone = ttk.Entry(
+            phone_row,
+            textvariable=self.wsp_phone_suffix_var,
+            width=12,
+            validate="key",
+            validatecommand=_vcmd,
+        )
+        e_phone.pack(side="left", padx=(2, 10))
+        _Tooltip(e_phone, "Solo los 9 dígitos de tu número peruano.\nEjemplo: 987654321\nEl prefijo +51 se agrega automáticamente.")
+        ttk.Button(
+            phone_row,
+            text="Probar",
+            style="Secundario.TButton",
+            command=self._probar_wsp,
+        ).pack(side="left")
+
+        # Checkboxes + botón guardar
+        chk_row = tk.Frame(wsp_card, bg=wsp_card_bg)
+        chk_row.pack(fill="x", anchor="w", pady=(6, 0))
+        ttk.Checkbutton(
+            chk_row,
+            text="Notificar al finalizar",
+            variable=self.wsp_notif_fin_var,
+        ).pack(side="left", padx=(0, 12))
+        ttk.Checkbutton(
+            chk_row,
+            text="Notificar si hay errores",
+            variable=self.wsp_notif_error_var,
+        ).pack(side="left", padx=(0, 16))
+        ttk.Button(
+            chk_row,
+            text="Guardar",
+            style="Secundario.TButton",
+            command=self._guardar_wsp_config,
+        ).pack(side="right")
 
         self.btn_iniciar = ttk.Button(
             f3,
@@ -1729,8 +1839,96 @@ class PeruComprasGUI:
         combo.grid(row=row, column=1, sticky="we", pady=4)
         combo._row_index = row
         combo._label_widget = lbl
+        # Bloquear el scroll del mouse cuando el dropdown está cerrado.
+        # Se reemplaza el binding (sin add="+") para que nuestro handler corra
+        # ANTES que el class-binding de ttk que cambia el valor, y "break"
+        # detiene la cadena de eventos por completo.
+        def _bloquear_scroll(event, _c=combo):
+            # Verificar si el popdown está realmente visible en pantalla
+            try:
+                popdown_path = str(_c.tk.call("ttk::combobox::PopdownWindow", _c))
+                if popdown_path and int(_c.tk.call("winfo", "ismapped", popdown_path)):
+                    return  # dropdown abierto → no interferir
+            except Exception:
+                pass
+            # Dropdown cerrado → bloquear cambio de valor y enviar scroll al canvas
+            if hasattr(self, "_main_canvas"):
+                self._main_canvas.yview_scroll(int(-event.delta / 120), "units")
+            return "break"
+        combo.bind("<MouseWheel>", _bloquear_scroll)  # reemplaza, no añade
         _Tooltip(combo, tip)
         return combo
+
+    # ------------------------------------------------------------------
+    # Notificaciones WhatsApp
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Helper para obtener el número completo (51 + sufijo)
+    # ------------------------------------------------------------------
+    def _get_wsp_full_phone(self) -> str:
+        suffix = self.wsp_phone_suffix_var.get().strip()
+        return "51" + suffix if suffix else ""
+
+    def _cargar_wsp_config(self):
+        """Carga el teléfono guardado en wsp_config.json."""
+        cfg = notif.cargar_config()
+        if cfg is None:
+            return
+        stored = cfg.get("telefono", "")
+        # El campo de entrada solo muestra los dígitos después del prefijo 51
+        suffix = stored[2:] if stored.startswith("51") and len(stored) > 2 else stored
+        self.wsp_phone_suffix_var.set(suffix)
+        self.wsp_notif_fin_var.set(cfg.get("notif_fin", True))
+        self.wsp_notif_error_var.set(cfg.get("notif_error", True))
+
+    def _guardar_wsp_config(self):
+        """Persiste el teléfono y preferencias en wsp_config.json."""
+        suffix = self.wsp_phone_suffix_var.get().strip()
+        if not suffix or len(suffix) < 9:
+            messagebox.showwarning(
+                "Número incompleto",
+                "Ingresa los 9 dígitos de tu número de WhatsApp peruano.\nEjemplo: 987654321 (sin el 51)",
+            )
+            return
+        notif.guardar_config(
+            telefono="51" + suffix,
+            notif_fin=self.wsp_notif_fin_var.get(),
+            notif_error=self.wsp_notif_error_var.get(),
+        )
+        messagebox.showinfo("Configuración guardada", "Tu número de WhatsApp fue guardado correctamente.")
+
+    def _probar_wsp(self):
+        """Envía un mensaje de prueba al número configurado."""
+        suffix = self.wsp_phone_suffix_var.get().strip()
+        if not suffix or len(suffix) < 9:
+            messagebox.showwarning(
+                "Número incompleto",
+                "Ingresa los 9 dígitos de tu número de WhatsApp peruano antes de probar.\nEjemplo: 987654321",
+            )
+            return
+        phone = "51" + suffix
+        if not notif.servidor_configurado():
+            messagebox.showerror(
+                "Servidor no configurado",
+                "El archivo wsp_server.json no fue encontrado.\n"
+                "Contacta al administrador del sistema para que configure las credenciales del servidor.",
+            )
+            return
+
+        def _test_thread():
+            ok, error = notif.testear_conexion_servidor(phone)
+            if ok:
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "Prueba exitosa",
+                    f"¡Mensaje enviado a +{phone}! Revisa tu WhatsApp.",
+                ))
+            else:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Prueba fallida",
+                    f"No se pudo enviar el mensaje al +{phone}:\n{error}",
+                ))
+
+        threading.Thread(target=_test_thread, daemon=True, name="wsp-test").start()
 
     def _toggle_avanzado(self):
         if self._avanzado_visible.get():
@@ -2169,17 +2367,35 @@ class PeruComprasGUI:
     # Cascada de filtros
     # ------------------------------------------------------------------
     def _on_acuerdo_changed(self, event=None):
-        self.combo_catalogo["values"] = []
-        self.catalogo_var.set("")
-        self.combo_categoria["values"] = []
-        self.categoria_var.set("")
+        acuerdo_sel = self.acuerdo_var.get().strip()
+        # Re-poblar catálogos desde el mapa en caché
+        catalogo_opts = self._acuerdo_catalogo_map.get(acuerdo_sel, [])
+        if not catalogo_opts:
+            # Búsqueda parcial por si el texto no coincide exactamente
+            for k, v in self._acuerdo_catalogo_map.items():
+                if acuerdo_sel and (acuerdo_sel in k or k in acuerdo_sel):
+                    catalogo_opts = v
+                    break
+        self.combo_catalogo["values"] = catalogo_opts
+        if catalogo_opts:
+            self.catalogo_var.set(catalogo_opts[0])
+            # También re-poblar categorías para el primer catálogo
+            cats = self._catalogo_categorias_map.get(catalogo_opts[0], [])
+            self.combo_categoria["values"] = cats
+            self.categoria_var.set(cats[0] if cats else "")
+        else:
+            self.catalogo_var.set("")
+            self.combo_categoria["values"] = []
+            self.categoria_var.set("")
         self.combo_region["values"] = []
         self.region_var.set("")
         self.combo_provincia["values"] = []
         self.provincia_var.set("")
         self._actualizar_resumen_seleccion()
-        self._actualizar_guia_filtros()
-        self._set_banner("Acuerdo cambiado. Si necesitas sincronizar catálogos y categorías, importa opciones del portal.")
+        if catalogo_opts:
+            self._set_banner(f"Acuerdo cambiado: {len(catalogo_opts)} catálogo(s) disponibles.")
+        else:
+            self._set_banner("Acuerdo cambiado. Si necesitas sincronizar catálogos y categorías, importa opciones del portal.")
 
     def _on_catalogo_changed(self, event=None):
         # Intentar poblar categorías desde la caché sin requerir re-importar
@@ -2263,6 +2479,7 @@ class PeruComprasGUI:
 
             catalogo_opts = []
             catalogo_categorias_map = {}  # {catalogo: [categorias...]}
+            acuerdo_catalogo_map = {}    # {acuerdo: [catalogos...]} para caché
             categoria_opts = []
             region_opts = []
             provincia_opts = []
@@ -2285,6 +2502,9 @@ class PeruComprasGUI:
                     time.sleep(2)
                     catalogo_opts = bot.leer_opciones_select(driver, catalogo_select_id)
                     log.info(f"Opciones Catálogo ({len(catalogo_opts)}): {catalogo_opts}")
+                    # Guardar mapeo acuerdo → catálogos para la caché
+                    if catalogo_opts:
+                        acuerdo_catalogo_map[texto_a] = catalogo_opts
                 except Exception as e:
                     log.warning(f"No se pudo cargar catálogos: {e}")
 
@@ -2353,6 +2573,7 @@ class PeruComprasGUI:
             self.root.after(0, lambda: self._actualizar_combos(
                 acuerdo_opts, catalogo_opts, categoria_opts,
                 region_opts, provincia_opts, catalogo_categorias_map,
+                acuerdo_catalogo_map=acuerdo_catalogo_map,
             ))
 
         except Exception as e:
@@ -2371,12 +2592,48 @@ class PeruComprasGUI:
             self.root.after(0, lambda: self.btn_cargar_opts.configure(state="normal"))
             self.root.after(0, lambda: self.btn_iniciar.configure(state="normal"))
 
-    def _actualizar_combos(self, acuerdos, catalogos, categorias, regiones=None, provincias=None, catalogo_categorias_map=None, silencioso=False):
+    # ------------------------------------------------------------------
+    # Persistencia de opciones del portal
+    # ------------------------------------------------------------------
+    def _cargar_portal_cache(self):
+        """Carga la caché de opciones del portal desde disco. Devuelve el dict o None."""
+        try:
+            if self._portal_cache_file.exists():
+                data = json.loads(self._portal_cache_file.read_text(encoding="utf-8"))
+                if data.get("acuerdos") and data.get("catalogo_por_acuerdo") and data.get("categoria_por_catalogo"):
+                    log.info(
+                        f"Caché del portal cargada (guardada: {data.get('saved_at', 'desconocido')})"
+                    )
+                    return data
+        except Exception as exc:
+            log.warning(f"No se pudo cargar la caché del portal: {exc}")
+        return None
+
+    def _guardar_portal_cache(self):
+        """Persiste las opciones del portal en disco para que sobrevivan a reinicios."""
+        try:
+            cache = {
+                "acuerdos": list(self.combo_acuerdo["values"]),
+                "catalogo_por_acuerdo": dict(self._acuerdo_catalogo_map),
+                "categoria_por_catalogo": dict(self._catalogo_categorias_map),
+                "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            self._portal_cache_file.write_text(
+                json.dumps(cache, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            log.info(f"Caché del portal guardada en {self._portal_cache_file}")
+        except Exception as exc:
+            log.warning(f"No se pudo guardar la caché del portal: {exc}")
+
+    def _actualizar_combos(self, acuerdos, catalogos, categorias, regiones=None, provincias=None, catalogo_categorias_map=None, acuerdo_catalogo_map=None, silencioso=False):
         regiones = regiones or []
         provincias = provincias or []
         # Guardar mapa completo para la cascada local sin re-importar
         if catalogo_categorias_map:
             self._catalogo_categorias_map = catalogo_categorias_map
+        if acuerdo_catalogo_map:
+            self._acuerdo_catalogo_map = acuerdo_catalogo_map
         self.combo_acuerdo["values"] = acuerdos
         self.combo_catalogo["values"] = catalogos
         self.combo_categoria["values"] = categorias
@@ -2390,6 +2647,10 @@ class PeruComprasGUI:
         self.metric_portal_var.set(
             f"{len(acuerdos)}/{len(catalogos)}/{len(categorias)}"
         )
+
+        # Guardar caché en disco siempre que sea una carga real del portal (no silenciosa)
+        if not silencioso:
+            self._guardar_portal_cache()
 
         # Asignar primer valor si el campo estaba vacío
         if acuerdos and not self.acuerdo_var.get():
@@ -2688,11 +2949,30 @@ class PeruComprasGUI:
                 f"Se generó un reporte con {exitos} éxito(s) y {fallos} fallo(s).",
                 "ok",
             ))
-            self.root.after(0, lambda: self._actualizar_stepper(0))
-            self.root.after(0, lambda: self._guiar("¡Listo! Revisa el reporte para ver qué se actualizó."))
+            # Notificación WhatsApp al finalizar
+            evento_notif = "FIN_OK" if fallos == 0 else "FIN_FALLOS"
+            notif.enviar_notificacion(
+                evento=evento_notif,
+                total=total,
+                exitos=exitos,
+                fallos=fallos,
+                modo=modo,
+                ruta_excel=Path(reporte) if reporte else None,
+            )
         except Exception as e:
             detalle = f"{e}\n\n{traceback.format_exc()}"
             log.error(f"Error fatal: {e}", exc_info=True)
+            # Notificación WhatsApp de error crítico
+            _total = len(bot.RESULTADOS)
+            _exitos = sum(1 for r in bot.RESULTADOS if r["Estado"] == "EXITO")
+            notif.enviar_notificacion(
+                evento="ERROR_CRITICO",
+                total=_total,
+                exitos=_exitos,
+                fallos=_total - _exitos,
+                modo=modo,
+                ruta_excel=Path(bot.REPORTE_PATH) if bot.REPORTE_PATH and Path(bot.REPORTE_PATH).exists() else None,
+            )
             self.root.after(0, lambda: self._set_banner(
                 "Error en la ejecución. Revisa la actividad detallada para soporte.",
                 "#FDECEA", self.C_PELIGRO,
